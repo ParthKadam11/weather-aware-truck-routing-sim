@@ -1,0 +1,9 @@
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.env
+*.sqlite3
+.mypy_cache
+htmlcov
+.git
