@@ -1,8 +1,8 @@
 import type { HeatmapFrameWeights, HeatmapPoint, HeatmapResponse } from "../types";
 
-/** Map risk score 1–5 → HeatmapLayer weight. */
+/** Map risk score 1–5 → HeatmapLayer weight in [0, 1]. No floor. */
 export function riskToWeight(score: number): number {
-  return Math.max(0.05, (score - 1) / 4);
+  return Math.max(0, Math.min(1, (score - 1) / 4));
 }
 
 /**

@@ -1,9 +1,10 @@
-import dayjs from "dayjs";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { AnalyzeRequest } from "../types";
+import styles from "./RouteForm.module.css";
 
 interface Props {
   loading: boolean;
+  loadingStep?: string | null;
   onSubmit: (req: AnalyzeRequest) => void;
 }
 
@@ -16,19 +17,29 @@ const MH_PLACES = [
   "Kolhapur, Maharashtra",
 ] as const;
 
-export function RouteForm({ loading, onSubmit }: Props) {
+function defaultDepartureLocal(): string {
+  const d = new Date(Date.now() + 60 * 60 * 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+export function RouteForm({ loading, loadingStep, onSubmit }: Props) {
   const [origin, setOrigin] = useState("Mumbai, Maharashtra");
   const [destination, setDestination] = useState("Pune, Maharashtra");
-  const [departure, setDeparture] = useState(
-    dayjs().add(1, "hour").format("YYYY-MM-DDTHH:mm"),
-  );
+  const [departure, setDeparture] = useState(defaultDepartureLocal);
   const [loadLb, setLoadLb] = useState(45000);
   const [interval, setIntervalMi] = useState<10 | 25 | 50>(25);
   const [demoStorm, setDemoStorm] = useState(false);
   const [chipTarget, setChipTarget] = useState<"origin" | "destination">("origin");
 
+  const buttonText = useMemo(() => {
+    if (!loading) return "Find safest routes";
+    return loadingStep || "Analyzing…";
+  }, [loading, loadingStep]);
+
   return (
     <form
+      className={styles.form}
       onSubmit={(e) => {
         e.preventDefault();
         onSubmit({
@@ -41,50 +52,59 @@ export function RouteForm({ loading, onSubmit }: Props) {
           display_tz: "Asia/Kolkata",
         });
       }}
-      style={{ display: "flex", flexDirection: "column", gap: "0.85rem" }}
     >
-      <div>
-        <label className="field-label" htmlFor="origin">
-          Origin
-        </label>
-        <input
-          id="origin"
-          className="field-input"
-          value={origin}
-          onChange={(e) => setOrigin(e.target.value)}
-          onFocus={() => setChipTarget("origin")}
-          required
-          placeholder="e.g. Mumbai, Maharashtra"
-          autoComplete="off"
-        />
-      </div>
-
-      <div>
-        <label className="field-label" htmlFor="destination">
-          Destination
-        </label>
-        <input
-          id="destination"
-          className="field-input"
-          value={destination}
-          onChange={(e) => setDestination(e.target.value)}
-          onFocus={() => setChipTarget("destination")}
-          required
-          placeholder="e.g. Pune, Maharashtra"
-          autoComplete="off"
-        />
-      </div>
-
-      <div>
-        <div className="field-label">
-          Maharashtra places → {chipTarget === "origin" ? "origin" : "destination"}
+      <div className={styles.odRow}>
+        <div className={styles.field}>
+          <label className={styles.label} htmlFor="origin">
+            Origin
+          </label>
+          <input
+            id="origin"
+            className={styles.input}
+            value={origin}
+            onChange={(e) => setOrigin(e.target.value)}
+            onFocus={() => setChipTarget("origin")}
+            required
+            autoComplete="off"
+          />
         </div>
-        <div className="place-chips">
+        <button
+          type="button"
+          className={styles.swap}
+          aria-label="Swap origin and destination"
+          onClick={() => {
+            setOrigin(destination);
+            setDestination(origin);
+          }}
+        >
+          ⇄
+        </button>
+        <div className={styles.field}>
+          <label className={styles.label} htmlFor="destination">
+            Destination
+          </label>
+          <input
+            id="destination"
+            className={styles.input}
+            value={destination}
+            onChange={(e) => setDestination(e.target.value)}
+            onFocus={() => setChipTarget("destination")}
+            required
+            autoComplete="off"
+          />
+        </div>
+      </div>
+
+      <div>
+        <div className={styles.label}>
+          Places → {chipTarget === "origin" ? "origin" : "destination"}
+        </div>
+        <div className={styles.chips}>
           {MH_PLACES.map((place) => (
             <button
               key={place}
               type="button"
-              className="place-chip"
+              className={styles.chip}
               onClick={() => {
                 if (chipTarget === "origin") setOrigin(place);
                 else setDestination(place);
@@ -97,12 +117,12 @@ export function RouteForm({ loading, onSubmit }: Props) {
       </div>
 
       <div>
-        <label className="field-label" htmlFor="departure">
-          Departure (Asia/Kolkata local browser clock → UTC)
+        <label className={styles.label} htmlFor="departure">
+          Departure
         </label>
         <input
           id="departure"
-          className="field-input"
+          className={styles.input}
           type="datetime-local"
           value={departure}
           onChange={(e) => setDeparture(e.target.value)}
@@ -110,20 +130,14 @@ export function RouteForm({ loading, onSubmit }: Props) {
         />
       </div>
 
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gap: "0.75rem",
-        }}
-      >
+      <div className={styles.row2}>
         <div>
-          <label className="field-label" htmlFor="load">
+          <label className={styles.label} htmlFor="load">
             Load (lb)
           </label>
           <input
             id="load"
-            className="field-input tabular"
+            className={`${styles.input} tabular`}
             type="number"
             min={0}
             step={1000}
@@ -133,45 +147,41 @@ export function RouteForm({ loading, onSubmit }: Props) {
           />
         </div>
         <div>
-          <label className="field-label" htmlFor="interval">
-            Checkpoints
-          </label>
-          <select
-            id="interval"
-            className="field-select"
-            value={interval}
-            onChange={(e) =>
-              setIntervalMi(Number(e.target.value) as 10 | 25 | 50)
-            }
-          >
-            <option value={10}>Every 10 mi</option>
-            <option value={25}>Every 25 mi</option>
-            <option value={50}>Every 50 mi</option>
-          </select>
+          <div className={styles.label}>Checkpoints</div>
+          <div className={styles.segment} role="group" aria-label="Checkpoint interval">
+            {([10, 25, 50] as const).map((mi) => (
+              <button
+                key={mi}
+                type="button"
+                className={`${styles.segBtn} ${interval === mi ? styles.segBtnActive : ""}`}
+                onClick={() => setIntervalMi(mi)}
+              >
+                {mi} mi
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
-      <div className="toggle-row">
+      <div className={styles.toggleRow}>
         <div>
-          <div style={{ fontSize: "0.875rem", fontWeight: 600 }}>Demo storm</div>
-          <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>
-            Overlay severe weather on the corridor
-          </div>
+          <div className={styles.toggleTitle}>Demo storm</div>
+          <div className={styles.toggleHint}>Severe weather on 1–2 routes</div>
         </div>
-        <label className="toggle">
+        <label className={styles.switch}>
           <input
             type="checkbox"
             checked={demoStorm}
             onChange={(e) => setDemoStorm(e.target.checked)}
             aria-label="Toggle demo storm"
           />
-          <span className="toggle-track" />
-          <span className="toggle-thumb" />
+          <span className={styles.track} />
+          <span className={styles.thumb} />
         </label>
       </div>
 
-      <button type="submit" className="btn-primary" disabled={loading}>
-        {loading ? "Analyzing corridor…" : "Find safest routes"}
+      <button type="submit" className={styles.submit} disabled={loading}>
+        {buttonText}
       </button>
     </form>
   );

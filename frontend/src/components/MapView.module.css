@@ -1,0 +1,10 @@
+.stage {
+  position: absolute;
+  inset: 0;
+  background: #d8dee8;
+}
+
+.canvas {
+  position: absolute;
+  inset: 0;
+}

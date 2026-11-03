@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import styles from "./ForecastSlider.module.css";
 
 interface Props {
   hour: number;
   maxHour: number;
   timeLabel: string | null;
-  /** Called at most once per animation frame while dragging. */
   onChange: (hour: number) => void;
   disabled?: boolean;
   showHeatmap: boolean;
@@ -21,8 +21,8 @@ export function ForecastSlider({
   onToggleHeatmap,
 }: Props) {
   const safeMax = Math.max(0, maxHour);
-  // Local value for snappy thumb; parent notified via rAF
   const [localHour, setLocalHour] = useState(hour);
+  const [playing, setPlaying] = useState(false);
   const pendingRef = useRef<number | null>(null);
   const latestRef = useRef(hour);
 
@@ -37,7 +37,26 @@ export function ForecastSlider({
     };
   }, []);
 
+  useEffect(() => {
+    if (!playing || disabled || safeMax <= 0) return;
+    const id = window.setInterval(() => {
+      const next = (latestRef.current + 1) % (safeMax + 1);
+      latestRef.current = next;
+      setLocalHour(next);
+      onChange(next);
+    }, 400);
+    return () => window.clearInterval(id);
+  }, [playing, disabled, safeMax, onChange]);
+
+  const ticks = useMemo(() => {
+    const out: number[] = [];
+    for (let h = 0; h <= safeMax; h += 6) out.push(h);
+    if (out[out.length - 1] !== safeMax) out.push(safeMax);
+    return out;
+  }, [safeMax]);
+
   const onSlide = (next: number) => {
+    setPlaying(false);
     setLocalHour(next);
     latestRef.current = next;
     if (pendingRef.current != null) return;
@@ -48,62 +67,35 @@ export function ForecastSlider({
   };
 
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: "0.4rem",
-        minWidth: 0,
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: "0.75rem",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "baseline", gap: "0.5rem", minWidth: 0 }}>
-          <span
-            style={{
-              fontFamily: "var(--font-display)",
-              fontWeight: 600,
-              fontSize: "0.8rem",
-            }}
-          >
-            Forecast
-          </span>
-          <span
-            className="tabular"
-            style={{
-              fontSize: "0.72rem",
-              color: "var(--muted)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {timeLabel ?? (localHour <= 0 ? "Now" : `Now +${localHour}h`)}
-          </span>
+    <div className={styles.panel}>
+      <div className={styles.top}>
+        <div className={`${styles.label} tabular`}>
+          {timeLabel ?? (localHour <= 0 ? "Now" : `Now +${localHour}h`)}
         </div>
-
-        <div className="toggle-row" style={{ padding: 0, gap: "0.4rem", flexShrink: 0 }}>
-          <span style={{ fontSize: "0.72rem", color: "var(--muted)" }}>Heat</span>
-          <label className="toggle">
+        <div className={styles.controls}>
+          <label className={styles.heat}>
+            Heat
             <input
               type="checkbox"
               checked={showHeatmap}
               onChange={(e) => onToggleHeatmap(e.target.checked)}
               aria-label="Toggle weather heatmap"
             />
-            <span className="toggle-track" />
-            <span className="toggle-thumb" />
           </label>
+          <button
+            type="button"
+            className={styles.play}
+            disabled={disabled || safeMax <= 0}
+            aria-label={playing ? "Pause forecast" : "Play forecast"}
+            onClick={() => setPlaying((p) => !p)}
+          >
+            {playing ? "❚❚" : "▶"}
+          </button>
         </div>
       </div>
 
       <input
+        className={styles.range}
         type="range"
         min={0}
         max={safeMax || 1}
@@ -112,25 +104,12 @@ export function ForecastSlider({
         disabled={disabled || safeMax <= 0}
         onChange={(e) => onSlide(Number(e.target.value))}
         aria-label="Forecast hour"
-        style={{
-          width: "100%",
-          accentColor: "var(--accent)",
-          cursor: disabled ? "not-allowed" : "pointer",
-        }}
       />
 
-      <div
-        className="tabular"
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          fontSize: "0.62rem",
-          color: "var(--muted)",
-        }}
-      >
-        <span>0h</span>
-        <span>48h in memory</span>
-        <span>{safeMax}h</span>
+      <div className={`${styles.ticks} tabular`}>
+        {ticks.map((h) => (
+          <span key={h}>{h}h</span>
+        ))}
       </div>
     </div>
   );

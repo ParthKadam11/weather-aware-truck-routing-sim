@@ -1,0 +1,130 @@
+.shell {
+  position: relative;
+  height: 100dvh;
+  width: 100%;
+  overflow: hidden;
+  background: var(--page);
+}
+
+.map {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-map);
+}
+
+.sidebar {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  bottom: 16px;
+  width: var(--sidebar-w);
+  z-index: var(--z-chrome);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.15rem 1.1rem 1.25rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.1);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.brand {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.45rem;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+}
+
+.brandSub {
+  margin: 0.3rem 0 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+.error {
+  margin: 0;
+  padding: 0.65rem 0.75rem;
+  border-radius: 10px;
+  background: #fef2f2;
+  color: var(--danger);
+  font-size: 0.8rem;
+}
+
+.hint {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+.sliderDock {
+  position: absolute;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  z-index: var(--z-chrome);
+  width: min(520px, calc(100vw - var(--sidebar-w) - 64px));
+  margin-left: calc(var(--sidebar-w) / 2);
+}
+
+.legendDock {
+  position: absolute;
+  left: calc(var(--sidebar-w) + 32px);
+  bottom: 20px;
+  z-index: var(--z-chrome);
+}
+
+.dim {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.35);
+  pointer-events: none;
+}
+
+.spinner {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 900px) {
+  .sidebar {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    max-height: 48dvh;
+    border-radius: 16px 16px 0 0;
+  }
+
+  .sliderDock {
+    margin-left: 0;
+    width: calc(100vw - 24px);
+    bottom: calc(48dvh + 12px);
+  }
+
+  .legendDock {
+    left: 12px;
+    bottom: calc(48dvh + 12px);
+  }
+}

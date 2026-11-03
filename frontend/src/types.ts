@@ -36,12 +36,12 @@ export interface RouteOption {
 
 /** Corridor grid point: GeoJSON [lng, lat] + 48 hourly risk scores (1–5). */
 export interface HeatmapPoint {
-  coordinates: [number, number]; // [lng, lat]
+  coordinates: [number, number];
   risk: number[];
 }
 
 export interface HeatmapResponse {
-  bbox: [number, number, number, number]; // [minLng, minLat, maxLng, maxLat]
+  bbox: [number, number, number, number];
   hours: number;
   times_utc: string[];
   coordinate_order: "lng,lat";
@@ -58,7 +58,6 @@ export interface AnalyzeResponse {
   interval_miles: number;
   display_tz: string;
   demo_storm: boolean;
-  /** Present when fewer than 3 distinct routes could be found (no clones). */
   routing_note?: string | null;
   recommendation: {
     route_id: string;
@@ -66,11 +65,9 @@ export interface AnalyzeResponse {
     ranked_ids: string[];
   };
   routes: RouteOption[];
-  /** Corridor risk grid — same response as routes (no second request). */
   heatmap: HeatmapResponse;
 }
 
-/** Precomputed heatmap weight per point for one forecast hour (held in memory). */
 export type HeatmapFrameWeights = number[];
 
 export interface AnalyzeRequest {
@@ -83,18 +80,22 @@ export interface AnalyzeRequest {
   demo_storm?: boolean | null;
 }
 
-/** Risk palette — Low green → Moderate yellow → High orange → Severe red → No Travel. */
+/** Risk palette — Low / Moderate / High / Severe / No Travel */
 export const RISK_COLORS: Record<RiskLabel, string> = {
-  Low: "#2f9e44",
-  Moderate: "#e6b800",
-  High: "#e8590c",
-  Severe: "#c92a2a",
-  "No Travel": "#1a1024",
+  Low: "#22c55e",
+  Moderate: "#eab308",
+  High: "#f97316",
+  Severe: "#dc2626",
+  "No Travel": "#4c1d95",
 };
 
-export const ROUTE_COLORS = {
-  recommended: "#c9922a",
-  recommendedHalo: "#c9922a",
-  selected: "#3d5a80",
-  muted: "#8a93a3",
-} as const;
+export const RISK_ORDER: RiskLabel[] = [
+  "Low",
+  "Moderate",
+  "High",
+  "Severe",
+  "No Travel",
+];
+
+export const MUTED_ROUTE = "#94a3b8";
+export const ROUTE_CASING = "#0f172a";

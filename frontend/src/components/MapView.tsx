@@ -15,19 +15,18 @@ import type {
   RiskLabel,
   RouteOption,
 } from "../types";
-import { RISK_COLORS, ROUTE_COLORS } from "../types";
+import { MUTED_ROUTE, RISK_COLORS, ROUTE_CASING } from "../types";
+import styles from "./MapView.module.css";
 
 const MAP_STYLE = "https://tiles.openfreemap.org/styles/positron";
 const MH_CENTER: [number, number] = [75.7, 19.2];
 const MH_ZOOM = 6.4;
-
 const HEATMAP_LAYER_ID = "corridor-heatmap";
 
 interface Props {
   analysis: AnalyzeResponse | null;
   selectedRouteId: string | null;
   heatmap: HeatmapResponse | null;
-  /** Precomputed weights for all 48 hours — indexed on slider change only. */
   heatmapFrames: HeatmapFrameWeights[];
   hour: number;
   showHeatmap: boolean;
@@ -51,7 +50,7 @@ function fitBounds(map: maplibregl.Map, analysis: AnalyzeResponse) {
   }
   if (!bounds.isEmpty()) {
     map.fitBounds(bounds, {
-      padding: { top: 72, bottom: 120, left: 420, right: 72 },
+      padding: { top: 72, bottom: 140, left: 400, right: 72 },
       duration: 700,
       maxZoom: 10,
     });
@@ -82,53 +81,66 @@ function buildRouteLayers(
     ? routes.find((r) => r.id === selectedRouteId)
     : (routes.find((r) => r.recommended) ?? routes[0]);
 
-  // Draw muted first; recommended last so it sits on top
+  // Muted first; selected last (on top)
   const ordered = [...routes].sort((a, b) => {
-    const score = (r: RouteOption) =>
-      r.recommended ? 2 : r.id === selected?.id ? 1 : 0;
+    const score = (r: RouteOption) => (r.id === selected?.id ? 1 : 0);
     return score(a) - score(b);
   });
 
   const layers: Layer[] = [];
 
   for (const route of ordered) {
+    const isSelected = selected?.id === route.id;
     const segments = buildRiskSegments(route);
-    const isRec = route.recommended;
-    const alpha = isRec ? 245 : 130;
-    const width = isRec ? 5 : 2.5;
 
-    if (isRec) {
+    if (isSelected) {
+      // 7px dark casing under 5px risk-colored stroke
       layers.push(
         new PathLayer<RiskSegment>({
-          id: `halo-${route.id}`,
+          id: `casing-${route.id}`,
           data: segments,
           getPath: (s) => s.path,
-          getColor: hexToRgba(ROUTE_COLORS.recommended, 40),
-          getWidth: 12,
+          getColor: hexToRgba(ROUTE_CASING, 230),
+          getWidth: 7,
           widthUnits: "pixels",
           pickable: false,
           jointRounded: true,
           capRounded: true,
         }),
       );
+      layers.push(
+        new PathLayer<RiskSegment>({
+          id: `path-${route.id}`,
+          data: segments,
+          getPath: (s) => s.path,
+          getColor: (s) => hexToRgba(RISK_COLORS[s.risk], 255),
+          getWidth: 5,
+          widthUnits: "pixels",
+          pickable: true,
+          jointRounded: true,
+          capRounded: true,
+          updateTriggers: {
+            getColor: route.checkpoints.map((c) => c.risk).join(","),
+          },
+        }),
+      );
+    } else {
+      // Other routes: 3px #94a3b8 at 60%
+      layers.push(
+        new PathLayer<RouteOption>({
+          id: `path-${route.id}`,
+          data: [route],
+          getPath: (r) =>
+            r.geometry.map((p) => [p.lng, p.lat] as [number, number]),
+          getColor: hexToRgba(MUTED_ROUTE, Math.round(0.6 * 255)),
+          getWidth: 3,
+          widthUnits: "pixels",
+          pickable: true,
+          jointRounded: true,
+          capRounded: true,
+        }),
+      );
     }
-
-    layers.push(
-      new PathLayer<RiskSegment>({
-        id: `path-${route.id}`,
-        data: segments,
-        getPath: (s) => s.path,
-        getColor: (s) => hexToRgba(RISK_COLORS[s.risk], alpha),
-        getWidth: width,
-        widthUnits: "pixels",
-        pickable: true,
-        jointRounded: true,
-        capRounded: true,
-        updateTriggers: {
-          getColor: route.checkpoints.map((c) => c.risk).join(","),
-        },
-      }),
-    );
   }
 
   const checkpoints = selected?.checkpoints ?? [];
@@ -174,9 +186,7 @@ function buildRouteLayers(
         ],
         getPosition: (d: { lng: number; lat: number }) => [d.lng, d.lat],
         getFillColor: (d: { kind: string }) =>
-          d.kind === "Origin"
-            ? [14, 20, 32, 240]
-            : hexToRgba(ROUTE_COLORS.recommended, 255),
+          d.kind === "Origin" ? [15, 23, 42, 240] : [34, 197, 94, 255],
         getRadius: 7,
         radiusUnits: "pixels",
         stroked: true,
@@ -201,19 +211,19 @@ function buildHeatmapLayer(
     id: HEATMAP_LAYER_ID,
     data: points,
     getPosition: (d) => d.coordinates,
-    // Index into the memoized frame — no risk array re-walk beyond O(1) lookup
     getWeight: (_d: HeatmapPoint, info: { index: number }) =>
-      weights[info.index] ?? 0.05,
+      weights[info.index] ?? 0,
     radiusPixels: 48,
-    intensity: 1.35,
-    threshold: 0.05,
-    opacity: 0.58,
+    intensity: 1.2,
+    threshold: 0.03,
+    opacity: 0.55,
+    colorDomain: [0, 1],
     colorRange: [
-      [47, 158, 68],
-      [230, 184, 0],
-      [232, 89, 12],
-      [201, 42, 42],
-      [26, 16, 36],
+      [34, 197, 94],
+      [234, 179, 8],
+      [249, 115, 22],
+      [220, 38, 38],
+      [76, 29, 149],
     ],
     updateTriggers: {
       getWeight: hour,
@@ -238,7 +248,6 @@ export function MapView({
   const hourRef = useRef(hour);
   const showHeatmapRef = useRef(showHeatmap);
   const rafRef = useRef<number | null>(null);
-
   const framesRef = useRef(heatmapFrames);
   const pointsRef = useRef(heatmap?.points ?? []);
 
@@ -257,7 +266,6 @@ export function MapView({
       h,
       showHeatmapRef.current,
     );
-    // Heatmap under routes; same route layer instances reused across hours
     const layers = heat
       ? [heat, ...routeLayersRef.current]
       : [...routeLayersRef.current];
@@ -282,7 +290,6 @@ export function MapView({
       style: MAP_STYLE,
       center: MH_CENTER,
       zoom: MH_ZOOM,
-      preserveDrawingBuffer: true,
     });
     map.addControl(new maplibregl.NavigationControl(), "top-right");
     mapRef.current = map;
@@ -294,11 +301,10 @@ export function MapView({
         if (!object) return null;
         if (layer?.id === "checkpoints") {
           const c = object as Checkpoint;
-          const reason = c.risk_reason || "—";
           return {
             className: "deck-tooltip",
             html: `<strong>${c.risk}</strong><br/>
-              <span style="opacity:.85">${reason}</span><br/>
+              <span style="opacity:.85">${c.risk_reason || "—"}</span><br/>
               ETA ${formatEta(c.eta_local)}<br/>
               Wind ${c.weather.wind_mph.toFixed(1)} mph ·
               Rain ${c.weather.precip_in_hr.toFixed(2)} in/h ·
@@ -306,10 +312,16 @@ export function MapView({
           };
         }
         if (layer?.id?.startsWith("path-")) {
-          const s = object as RiskSegment;
+          const s = object as RiskSegment | RouteOption;
+          if ("routeLabel" in s) {
+            return {
+              className: "deck-tooltip",
+              html: `<strong>${s.routeLabel}</strong><br/>${s.risk}`,
+            };
+          }
           return {
             className: "deck-tooltip",
-            html: `<strong>${s.routeLabel}</strong><br/>${s.risk}`,
+            html: `<strong>${(s as RouteOption).label}</strong>`,
           };
         }
         if (layer?.id === "endpoints") {
@@ -323,7 +335,6 @@ export function MapView({
     overlayRef.current = overlay;
 
     map.on("error", (e) => console.error("[MapLibre]", e.error ?? e));
-
     const ro = new ResizeObserver(() => map.resize());
     ro.observe(el);
     requestAnimationFrame(() => map.resize());
@@ -349,21 +360,18 @@ export function MapView({
     else map.once("load", run);
   }, [analysis]);
 
-  // Structural rebuild only when routes / selection / heatmap presence change — NOT on hour
   useEffect(() => {
     showHeatmapRef.current = showHeatmap;
     if (loading || !analysis) {
       routeLayersRef.current = [];
-      const overlay = overlayRef.current;
-      overlay?.setProps({ layers: [] });
+      overlayRef.current?.setProps({ layers: [] });
       return;
     }
     routeLayersRef.current = buildRouteLayers(analysis, selectedRouteId);
     paint(hourRef.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- hour handled separately via rAF
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [analysis, selectedRouteId, heatmap, showHeatmap, loading]);
 
-  // Slider: update only heatmap weights (same layer id + updateTriggers), rAF-throttled
   useEffect(() => {
     showHeatmapRef.current = showHeatmap;
     schedulePaint(hour);
@@ -371,14 +379,8 @@ export function MapView({
   }, [hour]);
 
   return (
-    <div className="map-stage" style={{ background: "var(--map-wash)" }}>
-      <div ref={containerRef} style={{ position: "absolute", inset: 0 }} />
-      {loading ? (
-        <div className="map-loading" role="status" aria-live="polite">
-          <span className="spinner" aria-hidden />
-          <span>Updating routes &amp; weather…</span>
-        </div>
-      ) : null}
+    <div className={styles.stage}>
+      <div ref={containerRef} className={styles.canvas} />
     </div>
   );
 }

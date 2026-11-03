@@ -1,13 +1,15 @@
-import { RISK_COLORS, type RiskLabel } from "../types";
-
-const ORDER: RiskLabel[] = ["Low", "Moderate", "High", "Severe", "No Travel"];
+import { RISK_COLORS, RISK_ORDER, type RiskLabel } from "../types";
+import styles from "./RiskLegend.module.css";
 
 export function RiskLegend() {
   return (
-    <div className="legend-row" aria-label="Risk legend">
-      {ORDER.map((label) => (
-        <span key={label} className="legend-item">
-          <span className="risk-dot" style={{ background: RISK_COLORS[label] }} />
+    <div className={styles.panel} aria-label="Risk legend">
+      {RISK_ORDER.map((label: RiskLabel) => (
+        <span key={label} className={styles.item}>
+          <span
+            className={styles.dot}
+            style={{ background: RISK_COLORS[label] }}
+          />
           {label}
         </span>
       ))}
