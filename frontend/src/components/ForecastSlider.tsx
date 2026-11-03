@@ -37,8 +37,6 @@ export function ForecastSlider({
     };
   }, []);
 
-  const shortTime = timeLabel ? timeLabel.replace("T", " ").slice(0, 16) : null;
-
   const onSlide = (next: number) => {
     setLocalHour(next);
     latestRef.current = next;
@@ -86,7 +84,7 @@ export function ForecastSlider({
               whiteSpace: "nowrap",
             }}
           >
-            {localHour}h{shortTime ? ` · ${shortTime}` : ""}
+            {timeLabel ?? (localHour <= 0 ? "Now" : `Now +${localHour}h`)}
           </span>
         </div>
 

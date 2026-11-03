@@ -5,6 +5,7 @@ import { MapView } from "./components/MapView";
 import { RiskLegend } from "./components/RiskLegend";
 import { RouteForm } from "./components/RouteForm";
 import { RouteSummaryCards } from "./components/RouteSummaryCards";
+import { formatForecastIstLabel } from "./lib/forecastLabel";
 import { memoizeHeatmapFrames } from "./lib/heatmapFrames";
 import type { AnalyzeRequest, AnalyzeResponse, HeatmapResponse } from "./types";
 
@@ -43,7 +44,7 @@ export default function App() {
     0,
     (heatmap?.hours ?? (heatmapFrames.length || 1)) - 1,
   );
-  const timeLabel = heatmap?.times_utc?.[hour] ?? null;
+  const timeLabel = formatForecastIstLabel(hour, heatmap?.times_utc);
 
   return (
     <div className="app-shell">

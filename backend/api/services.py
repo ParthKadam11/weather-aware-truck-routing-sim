@@ -26,6 +26,7 @@ from core.recommend import (
     recommend,
 )
 from core.risk import RISK_LABELS, WeatherSample, classify_checkpoint, classify_checkpoint_explained
+from core.storm import StormConfig, build_storm_config
 from core.units import meters_to_miles
 
 
@@ -49,9 +50,9 @@ def _heatmap_payload(
     series_list: list[weather.HourlySeries],
     load_lb: float,
     use_demo: bool,
+    storm: StormConfig | None,
     mid_lat: float,
     mid_lng: float,
-    storm_peak: int,
     hours: int = HOURLY_HORIZON,
 ) -> dict[str, Any]:
     """Build corridor heatmap from grid points + already-fetched hourly series."""
@@ -62,14 +63,7 @@ def _heatmap_payload(
 
     points_out: list[dict[str, Any]] = []
     for (lng, lat), series in zip(grid_lnglat, series_list):
-        wx = series
-        if use_demo:
-            wx = weather.apply_demo_storm(
-                series,
-                storm_lat=mid_lat + 0.35,
-                storm_lng=mid_lng - 0.15,
-                peak_hour=storm_peak,
-            )
+        wx = weather.apply_storm(series, storm) if (use_demo and storm) else series
         risk_hours: list[int] = []
         for h in range(hours):
             if h >= len(wx.wind_mph):
@@ -174,9 +168,14 @@ def analyze_routes(
         series_all = weather.fetch_hourly_batch(all_points, client=client)
         _timing(f"open-meteo batch ({len(all_points)} pts)", t0)
 
-        storm_peak = 8
+        storm: StormConfig | None = None
         if use_demo and series_all:
-            storm_peak = weather.peak_hour_for_departure(series_all[0], departure)
+            storm = build_storm_config(
+                polylines,
+                departure_utc=departure,
+                forecast_times=series_all[0].times,
+                peak_offset_h=2,
+            )
 
         t0 = time.perf_counter()
         route_payloads: list[dict[str, Any]] = []
@@ -196,13 +195,8 @@ def analyze_routes(
             levels = []
 
             for cp, series in zip(cps, series_list):
-                if use_demo:
-                    series = weather.apply_demo_storm(
-                        series,
-                        storm_lat=mid_lat + 0.55,
-                        storm_lng=mid_lng,
-                        peak_hour=storm_peak,
-                    )
+                if storm is not None:
+                    series = weather.apply_storm(series, storm)
                 eta = eta_by_idx[cp.index]
                 sample = weather.sample_at_eta(series, eta.eta_utc)
                 level, risk_reason = classify_checkpoint_explained(sample, load_lb)
@@ -275,9 +269,9 @@ def analyze_routes(
             series_list=grid_series,
             load_lb=load_lb,
             use_demo=use_demo,
+            storm=storm,
             mid_lat=mid_lat,
             mid_lng=mid_lng,
-            storm_peak=storm_peak,
         )
         _timing(f"heatmap assemble ({len(grid_lnglat)} pts × {HOURLY_HORIZON}h)", t0)
         _timing("analyze_routes total", t_all)
@@ -365,10 +359,13 @@ def build_heatmap(
         weather_points = [(lat, lng) for lng, lat in grid_lnglat]
         series_list = weather.fetch_hourly_batch(weather_points, client=client)
 
-        storm_peak = 8
+        storm: StormConfig | None = None
         if use_demo and series_list:
-            storm_peak = weather.peak_hour_for_departure(
-                series_list[0], datetime.now(tz=timezone.utc)
+            storm = build_storm_config(
+                polylines,
+                departure_utc=datetime.now(tz=timezone.utc),
+                forecast_times=series_list[0].times,
+                peak_offset_h=2,
             )
 
         return _heatmap_payload(
@@ -376,8 +373,8 @@ def build_heatmap(
             series_list=series_list,
             load_lb=load_lb,
             use_demo=use_demo,
+            storm=storm,
             mid_lat=mid_lat,
             mid_lng=mid_lng,
-            storm_peak=storm_peak,
             hours=hours,
         )

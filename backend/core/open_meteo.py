@@ -7,6 +7,7 @@ Open-Meteo defaults are km/h, mm, and cm. We always request:
 and convert snowfall from cm → inches explicitly (API has no inch option for snow).
 
 Multi-location: pass comma-separated latitude/longitude lists in one GET.
+forecast_hours=48 starts at the current UTC hour so index 0 = "now".
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from core.units import cm_to_inches
 # Explicit unit overrides — never rely on Open-Meteo defaults (km/h, mm).
 WIND_SPEED_UNIT = "mph"
 PRECIPITATION_UNIT = "inch"
-# 48 hourly slots ⇒ 2 forecast days
+# 48 hourly slots starting at the current UTC hour
 HOURLY_HORIZON = 48
 
 
@@ -31,10 +32,6 @@ class ParsedHourly:
     snow_in: list[float]
 
 
-def _forecast_days_for_hours(hours: int) -> int:
-    return max(1, (max(1, hours) + 23) // 24)
-
-
 def forecast_query_params(
     lat: float,
     lng: float,
@@ -42,15 +39,20 @@ def forecast_query_params(
     forecast_days: int | None = None,
     forecast_hours: int = HOURLY_HORIZON,
 ) -> dict[str, str | int | float]:
-    """Query params for a single-coordinate GET /v1/forecast."""
-    days = forecast_days if forecast_days is not None else _forecast_days_for_hours(forecast_hours)
+    """
+    Query params for a single-coordinate GET /v1/forecast.
+
+    Uses forecast_hours (not forecast_days) so the series begins at the
+    current UTC hour — slider index 0 = now.
+    """
+    del forecast_days  # horizon is hour-based; days would shift the start window
     return {
         "latitude": lat,
         "longitude": lng,
         "hourly": "wind_speed_10m,precipitation,snowfall",
         "wind_speed_unit": WIND_SPEED_UNIT,
         "precipitation_unit": PRECIPITATION_UNIT,
-        "forecast_days": days,
+        "forecast_hours": int(forecast_hours),
         "timezone": "UTC",
     }
 
@@ -63,20 +65,20 @@ def forecast_query_params_multi(
 ) -> dict[str, str | int]:
     """
     One request for many points: latitude=lat1,lat2,… & longitude=lng1,lng2,…
-    Open-Meteo returns a JSON array (one object per location).
+
+    forecast_hours=48 → hourly axis starts at the current UTC hour.
     """
     if len(latitudes) != len(longitudes):
         raise ValueError("latitudes and longitudes length mismatch")
     if not latitudes:
         raise ValueError("need at least one coordinate")
-    days = _forecast_days_for_hours(forecast_hours)
     return {
         "latitude": ",".join(f"{lat:.5f}" for lat in latitudes),
         "longitude": ",".join(f"{lng:.5f}" for lng in longitudes),
         "hourly": "wind_speed_10m,precipitation,snowfall",
         "wind_speed_unit": WIND_SPEED_UNIT,
         "precipitation_unit": PRECIPITATION_UNIT,
-        "forecast_days": days,
+        "forecast_hours": int(forecast_hours),
         "timezone": "UTC",
     }
 

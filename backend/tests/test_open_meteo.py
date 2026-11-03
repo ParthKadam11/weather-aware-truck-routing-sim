@@ -17,7 +17,9 @@ def test_forecast_params_override_default_units():
     assert params["precipitation_unit"] == "inch"
     assert params["wind_speed_unit"] == WIND_SPEED_UNIT
     assert params["precipitation_unit"] == PRECIPITATION_UNIT
-    assert params["forecast_days"] == 2  # 48 hourly values
+    assert params["forecast_hours"] == 48
+    assert "forecast_days" not in params
+    assert params["timezone"] == "UTC"
     assert params["wind_speed_unit"] != "kmh"
     assert params["precipitation_unit"] != "mm"
     assert "wind_speed_10m" in str(params["hourly"])
@@ -35,7 +37,8 @@ def test_multi_location_comma_separated_lists():
     assert params["longitude"] == "72.88000,73.86000,79.09000"
     assert params["wind_speed_unit"] == "mph"
     assert params["precipitation_unit"] == "inch"
-    assert params["forecast_days"] == 2
+    assert params["forecast_hours"] == 48
+    assert "forecast_days" not in params
 
 
 def test_snowfall_cm_converted_to_inches():

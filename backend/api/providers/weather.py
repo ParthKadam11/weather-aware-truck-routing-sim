@@ -9,7 +9,6 @@ rounded lat/lng + forecast hour.
 from __future__ import annotations
 
 import hashlib
-import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,6 +25,7 @@ from core.open_meteo import (
     parse_hourly_payload,
 )
 from core.risk import WeatherSample
+from core.storm import StormConfig
 
 
 @dataclass(frozen=True)
@@ -49,16 +49,11 @@ def _round_ll(lat: float, lng: float) -> tuple[float, float]:
 
 
 def _series_cache_key(lat: float, lng: float) -> str:
+    """Include current UTC hour so forecast_hours=48 'now' window stays fresh."""
     rlat, rlng = _round_ll(lat, lng)
-    raw = f"series:{rlat},{rlng}:h{HOURLY_HORIZON}"
+    hour_bucket = datetime.now(tz=timezone.utc).strftime("%Y%m%d%H")
+    raw = f"series:{rlat},{rlng}:h{HOURLY_HORIZON}:{hour_bucket}"
     return "wx:" + hashlib.sha1(raw.encode()).hexdigest()
-
-
-def _hour_cache_key(lat: float, lng: float, hour_key: str) -> str:
-    """Cache key for a single ETA hour sample: rounded lat/lng + hour."""
-    rlat, rlng = _round_ll(lat, lng)
-    raw = f"hour:{rlat},{rlng}:{hour_key}"
-    return "wxh:" + hashlib.sha1(raw.encode()).hexdigest()
 
 
 def _eta_hour_key(eta_utc: datetime) -> str:
@@ -133,15 +128,14 @@ def _fetch_chunk(
     missing: list[tuple[float, float]],
     *,
     forecast_hours: int,
-    forecast_days: int | None,
+    forecast_days: int | None = None,
 ) -> list[tuple[tuple[float, float], HourlySeries]]:
     """Fetch one ≤BATCH_CHUNK_SIZE chunk; uses its own httpx client (thread-safe)."""
+    del forecast_days
     url = f"{settings.OPEN_METEO_BASE_URL.rstrip('/')}/v1/forecast"
     lats = [m[0] for m in missing]
     lngs = [m[1] for m in missing]
     params = forecast_query_params_multi(lats, lngs, forecast_hours=forecast_hours)
-    if forecast_days is not None:
-        params["forecast_days"] = max(int(params["forecast_days"]), int(forecast_days))
     with httpx.Client(timeout=60.0) as client:
         resp = client.get(url, params=params)
         resp.raise_for_status()
@@ -228,18 +222,13 @@ def sample_at_eta(series: HourlySeries, eta_utc: datetime) -> WeatherSample:
     """
     Pick the hourly slot for this ETA.
 
-    Caches the sample under rounded lat/lng + hour so repeat lookups are free.
+    No sample cache — demo-storm overlays mutate series values; caching by
+    lat/lng/hour alone would leak storm-on samples into storm-off requests.
     """
     hour_key = _eta_hour_key(eta_utc)
-    cache_key = _hour_cache_key(series.lat, series.lng, hour_key)
-    cached = weather_cache.get(cache_key)
-    if cached is not None:
-        return cached
 
     if not series.times:
-        sample = WeatherSample(0.0, 0.0, 0.0)
-        weather_cache.set(cache_key, sample, ttl_s=settings.WEATHER_CACHE_TTL_S)
-        return sample
+        return WeatherSample(0.0, 0.0, 0.0)
 
     if hour_key in series.times:
         idx = series.times.index(hour_key)
@@ -248,7 +237,8 @@ def sample_at_eta(series: HourlySeries, eta_utc: datetime) -> WeatherSample:
         idx = 0
         best = abs(
             (
-                datetime.fromisoformat(series.times[0]).replace(tzinfo=timezone.utc) - target
+                datetime.fromisoformat(series.times[0]).replace(tzinfo=timezone.utc)
+                - target
             ).total_seconds()
         )
         for i, t in enumerate(series.times):
@@ -259,39 +249,25 @@ def sample_at_eta(series: HourlySeries, eta_utc: datetime) -> WeatherSample:
                 idx = i
 
     idx = min(idx, len(series.wind_mph) - 1)
-    sample = WeatherSample(
+    return WeatherSample(
         wind_mph=series.wind_mph[idx],
         precip_in_hr=series.precip_in[idx],
         snow_in_hr=series.snow_in[idx],
     )
-    weather_cache.set(cache_key, sample, ttl_s=settings.WEATHER_CACHE_TTL_S)
-    return sample
 
 
-def apply_demo_storm(
-    series: HourlySeries,
-    *,
-    storm_lat: float,
-    storm_lng: float,
-    peak_hour: int = 6,
-) -> HourlySeries:
-    """
-    Overlay a fake intense storm near (storm_lat, storm_lng) peaking at hour index.
-    """
-    wind = list(series.wind_mph)
-    precip = list(series.precip_in)
-    snow = list(series.snow_in)
+def apply_storm(series: HourlySeries, storm: StormConfig) -> HourlySeries:
+    """Apply shared StormConfig (wind + rain only, no snow, no floors)."""
+    from core.storm import apply_storm_arrays
 
-    dist = math.hypot(series.lat - storm_lat, series.lng - storm_lng)
-    influence = max(0.0, 1.0 - dist / 2.0)
-
-    for i in range(len(wind)):
-        hour_w = 0.35 + 0.65 * math.exp(-0.5 * ((i - peak_hour) / 6.0) ** 2)
-        factor = influence * hour_w
-        wind[i] = max(wind[i], 18.0 + 50.0 * factor)
-        precip[i] = max(precip[i], 0.05 + 1.2 * factor)
-        snow[i] = max(snow[i], 0.2 + 3.5 * factor)
-
+    wind, precip, snow = apply_storm_arrays(
+        lat=series.lat,
+        lng=series.lng,
+        wind_mph=series.wind_mph,
+        precip_in=series.precip_in,
+        snow_in=series.snow_in,
+        storm=storm,
+    )
     return HourlySeries(
         times=list(series.times),
         wind_mph=wind,
@@ -302,29 +278,15 @@ def apply_demo_storm(
     )
 
 
-def peak_hour_for_departure(series: HourlySeries, departure_utc: datetime) -> int:
-    """Align demo-storm peak with the trip's departure hour in the forecast axis."""
-    if not series.times:
-        return 8
-    if departure_utc.tzinfo is None:
-        departure_utc = departure_utc.replace(tzinfo=timezone.utc)
-    target = departure_utc.astimezone(timezone.utc).replace(
-        minute=0, second=0, microsecond=0
+# Back-compat alias used by older call sites / docs
+def apply_demo_storm(
+    series: HourlySeries,
+    *,
+    storm_lat: float,
+    storm_lng: float,
+    peak_hour: int = 2,
+) -> HourlySeries:
+    return apply_storm(
+        series,
+        StormConfig(lat=storm_lat, lng=storm_lng, peak_hour=peak_hour),
     )
-    target_str = target.strftime("%Y-%m-%dT%H:%M")
-    if target_str in series.times:
-        return series.times.index(target_str)
-    best_i, best_d = 0, float("inf")
-    for i, t in enumerate(series.times):
-        dt = datetime.fromisoformat(t).replace(tzinfo=timezone.utc)
-        d = abs((dt - target).total_seconds())
-        if d < best_d:
-            best_d, best_i = d, i
-    return best_i
-
-
-def maybe_demo(series: HourlySeries, corridor_mid: tuple[float, float]) -> HourlySeries:
-    if not settings.DEMO_STORM:
-        return series
-    lat, lng = corridor_mid
-    return apply_demo_storm(series, storm_lat=lat + 0.4, storm_lng=lng - 0.3, peak_hour=8)
