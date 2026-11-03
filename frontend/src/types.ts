@@ -34,22 +34,6 @@ export interface RouteOption {
   rank: number;
 }
 
-export interface AnalyzeResponse {
-  origin: { query: string; lat: number; lng: number; label: string };
-  destination: { query: string; lat: number; lng: number; label: string };
-  departure_utc: string;
-  load_lb: number;
-  interval_miles: number;
-  display_tz: string;
-  demo_storm: boolean;
-  recommendation: {
-    route_id: string;
-    reason: string;
-    ranked_ids: string[];
-  };
-  routes: RouteOption[];
-}
-
 /** Corridor grid point: GeoJSON [lng, lat] + 48 hourly risk scores (1–5). */
 export interface HeatmapPoint {
   coordinates: [number, number]; // [lng, lat]
@@ -64,6 +48,24 @@ export interface HeatmapResponse {
   buffer_km: number;
   demo_storm: boolean;
   points: HeatmapPoint[];
+}
+
+export interface AnalyzeResponse {
+  origin: { query: string; lat: number; lng: number; label: string };
+  destination: { query: string; lat: number; lng: number; label: string };
+  departure_utc: string;
+  load_lb: number;
+  interval_miles: number;
+  display_tz: string;
+  demo_storm: boolean;
+  recommendation: {
+    route_id: string;
+    reason: string;
+    ranked_ids: string[];
+  };
+  routes: RouteOption[];
+  /** Corridor risk grid — same response as routes (no second request). */
+  heatmap: HeatmapResponse;
 }
 
 /** Precomputed heatmap weight per point for one forecast hour (held in memory). */

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Sequence
@@ -124,6 +125,41 @@ def fetch_hourly(
             client.close()
 
 
+# Open-Meteo multi-location URL length / practicality cap per request
+BATCH_CHUNK_SIZE = 100
+
+
+def _fetch_chunk(
+    missing: list[tuple[float, float]],
+    *,
+    forecast_hours: int,
+    forecast_days: int | None,
+) -> list[tuple[tuple[float, float], HourlySeries]]:
+    """Fetch one ≤BATCH_CHUNK_SIZE chunk; uses its own httpx client (thread-safe)."""
+    url = f"{settings.OPEN_METEO_BASE_URL.rstrip('/')}/v1/forecast"
+    lats = [m[0] for m in missing]
+    lngs = [m[1] for m in missing]
+    params = forecast_query_params_multi(lats, lngs, forecast_hours=forecast_hours)
+    if forecast_days is not None:
+        params["forecast_days"] = max(int(params["forecast_days"]), int(forecast_days))
+    with httpx.Client(timeout=60.0) as client:
+        resp = client.get(url, params=params)
+        resp.raise_for_status()
+        locations = _normalize_multi_response(resp.json())
+    if len(locations) != len(missing):
+        raise WeatherError(
+            f"Open-Meteo returned {len(locations)} locations, expected {len(missing)}"
+        )
+    out: list[tuple[tuple[float, float], HourlySeries]] = []
+    for (lat, lng), loc in zip(missing, locations):
+        series = _parse_series(lat, lng, loc.get("hourly") or {})
+        weather_cache.set(
+            _series_cache_key(lat, lng), series, ttl_s=settings.WEATHER_CACHE_TTL_S
+        )
+        out.append(((lat, lng), series))
+    return out
+
+
 def fetch_hourly_batch(
     points: Sequence[tuple[float, float]],
     *,
@@ -132,71 +168,60 @@ def fetch_hourly_batch(
     client: httpx.Client | None = None,
 ) -> list[HourlySeries]:
     """
-    ONE Open-Meteo request for all coordinates (comma-separated lat/lng lists).
+    Fetch 48h hourly forecasts for many coordinates.
 
-    Dedupes by rounded lat/lng, requests 48 hourly values, maps results back
-    to the original point order.
+    Dedupes by rounded lat/lng, serves from cache when possible, and for misses
+    chunks at ~100 points with parallel Open-Meteo requests (ThreadPoolExecutor).
     """
+    del client  # workers own their clients
     if not points:
         return []
 
-    owns = client is None
-    client = client or httpx.Client(timeout=60.0)
-    try:
-        # Preserve order of first occurrence for the HTTP request
-        unique_order: list[tuple[float, float]] = []
-        index_map: dict[tuple[float, float], list[int]] = {}
-        for i, (lat, lng) in enumerate(points):
-            key = _round_ll(lat, lng)
-            if key not in index_map:
-                index_map[key] = []
-                unique_order.append(key)
-            index_map[key].append(i)
+    unique_order: list[tuple[float, float]] = []
+    index_map: dict[tuple[float, float], list[int]] = {}
+    for i, (lat, lng) in enumerate(points):
+        key = _round_ll(lat, lng)
+        if key not in index_map:
+            index_map[key] = []
+            unique_order.append(key)
+        index_map[key].append(i)
 
-        results: list[HourlySeries | None] = [None] * len(points)
-        missing: list[tuple[float, float]] = []
-        for key in unique_order:
-            cached = weather_cache.get(_series_cache_key(key[0], key[1]))
-            if cached is not None:
-                for i in index_map[key]:
-                    results[i] = cached
-            else:
-                missing.append(key)
+    results: list[HourlySeries | None] = [None] * len(points)
+    missing: list[tuple[float, float]] = []
+    for key in unique_order:
+        cached = weather_cache.get(_series_cache_key(key[0], key[1]))
+        if cached is not None:
+            for i in index_map[key]:
+                results[i] = cached
+        else:
+            missing.append(key)
 
-        if missing:
-            url = f"{settings.OPEN_METEO_BASE_URL.rstrip('/')}/v1/forecast"
-            lats = [m[0] for m in missing]
-            lngs = [m[1] for m in missing]
-            params = forecast_query_params_multi(
-                lats, lngs, forecast_hours=forecast_hours
-            )
-            # forecast_days override if caller insists (kept for heatmap compat)
-            if forecast_days is not None:
-                params["forecast_days"] = max(
-                    int(params["forecast_days"]), int(forecast_days)
-                )
-            resp = client.get(url, params=params)
-            resp.raise_for_status()
-            locations = _normalize_multi_response(resp.json())
-            if len(locations) != len(missing):
-                raise WeatherError(
-                    f"Open-Meteo returned {len(locations)} locations, expected {len(missing)}"
-                )
-            for (lat, lng), loc in zip(missing, locations):
-                series = _parse_series(lat, lng, loc.get("hourly") or {})
-                weather_cache.set(
-                    _series_cache_key(lat, lng), series, ttl_s=settings.WEATHER_CACHE_TTL_S
-                )
-                for i in index_map[(lat, lng)]:
-                    results[i] = series
+    if missing:
+        chunks = [
+            missing[i : i + BATCH_CHUNK_SIZE]
+            for i in range(0, len(missing), BATCH_CHUNK_SIZE)
+        ]
+        try:
+            workers = min(8, len(chunks))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [
+                    pool.submit(
+                        _fetch_chunk,
+                        chunk,
+                        forecast_hours=forecast_hours,
+                        forecast_days=forecast_days,
+                    )
+                    for chunk in chunks
+                ]
+                for fut in as_completed(futures):
+                    for (lat, lng), series in fut.result():
+                        for i in index_map[(lat, lng)]:
+                            results[i] = series
+        except httpx.HTTPError as exc:
+            raise WeatherError(f"weather batch fetch failed: {exc}") from exc
 
-        assert all(r is not None for r in results)
-        return results  # type: ignore[return-value]
-    except httpx.HTTPError as exc:
-        raise WeatherError(f"weather batch fetch failed: {exc}") from exc
-    finally:
-        if owns:
-            client.close()
+    assert all(r is not None for r in results)
+    return results  # type: ignore[return-value]
 
 
 def sample_at_eta(series: HourlySeries, eta_utc: datetime) -> WeatherSample:

@@ -6,6 +6,7 @@ This is the only module that ties providers to core logic. Views stay thin.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,7 +15,9 @@ from django.conf import settings
 
 from api.providers import geocoding, routing, weather
 from core.checkpoints import sample_checkpoints
+from core.corridor import corridor_grid_points
 from core.eta import etas_along_route, to_local
+from core.open_meteo import HOURLY_HORIZON
 from core.recommend import (
     RouteRiskSummary,
     average_risk,
@@ -22,7 +25,7 @@ from core.recommend import (
     forward_segment_miles,
     recommend,
 )
-from core.risk import RISK_LABELS, classify_checkpoint_explained
+from core.risk import RISK_LABELS, WeatherSample, classify_checkpoint, classify_checkpoint_explained
 from core.units import meters_to_miles
 
 
@@ -32,6 +35,76 @@ def _parse_departure(value: str) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _timing(label: str, t0: float) -> None:
+    if settings.DEBUG:
+        ms = (time.perf_counter() - t0) * 1000.0
+        print(f"[timing] {label}: {ms:.0f} ms", flush=True)
+
+
+def _heatmap_payload(
+    *,
+    grid_lnglat: list[tuple[float, float]],
+    series_list: list[weather.HourlySeries],
+    load_lb: float,
+    use_demo: bool,
+    mid_lat: float,
+    mid_lng: float,
+    storm_peak: int,
+    hours: int = HOURLY_HORIZON,
+) -> dict[str, Any]:
+    """Build corridor heatmap from grid points + already-fetched hourly series."""
+    hours = max(1, min(HOURLY_HORIZON, hours))
+    time_axis: list[str] = []
+    if series_list and series_list[0].times:
+        time_axis = list(series_list[0].times[:hours])
+
+    points_out: list[dict[str, Any]] = []
+    for (lng, lat), series in zip(grid_lnglat, series_list):
+        wx = series
+        if use_demo:
+            wx = weather.apply_demo_storm(
+                series,
+                storm_lat=mid_lat + 0.35,
+                storm_lng=mid_lng - 0.15,
+                peak_hour=storm_peak,
+            )
+        risk_hours: list[int] = []
+        for h in range(hours):
+            if h >= len(wx.wind_mph):
+                risk_hours.append(1)
+                continue
+            sample = WeatherSample(
+                wind_mph=wx.wind_mph[h],
+                precip_in_hr=wx.precip_in[h],
+                snow_in_hr=wx.snow_in[h],
+            )
+            risk_hours.append(int(classify_checkpoint(sample, load_lb)))
+        points_out.append({"coordinates": [lng, lat], "risk": risk_hours})
+
+    if grid_lnglat:
+        lngs = [lng for lng, _ in grid_lnglat]
+        lats = [lat for _, lat in grid_lnglat]
+        pad = 0.15
+        bbox = [
+            min(lngs) - pad,
+            min(lats) - pad,
+            max(lngs) + pad,
+            max(lats) + pad,
+        ]
+    else:
+        bbox = [mid_lng - 0.5, mid_lat - 0.5, mid_lng + 0.5, mid_lat + 0.5]
+
+    return {
+        "bbox": bbox,
+        "hours": hours,
+        "times_utc": time_axis,
+        "coordinate_order": "lng,lat",
+        "buffer_km": 20,
+        "demo_storm": use_demo,
+        "points": points_out,
+    }
 
 
 def analyze_routes(
@@ -47,24 +120,27 @@ def analyze_routes(
     display_tz = display_tz or settings.DEFAULT_DISPLAY_TZ
     departure = _parse_departure(departure_iso)
     use_demo = settings.DEMO_STORM if demo_storm is None else demo_storm
+    t_all = time.perf_counter()
 
-    with httpx.Client(timeout=45.0) as client:
-        origin = geocoding.geocode(origin_query, client=client)
-        dest = geocoding.geocode(destination_query, client=client)
+    with httpx.Client(timeout=90.0) as client:
+        t0 = time.perf_counter()
+        origin, dest = geocoding.geocode_pair(origin_query, destination_query)
+        _timing("geocode (parallel)", t0)
 
         origin_ll = (origin.lng, origin.lat)
         dest_ll = (dest.lng, dest.lat)
 
+        t0 = time.perf_counter()
         initial = routing.fetch_routes(origin_ll, dest_ll, alternatives=True, client=client)
         three = routing.ensure_three(origin_ll, dest_ll, initial, client=client)
+        _timing("routing (3 routes)", t0)
 
-        # Corridor midpoint for demo storm placement
         mid_lat = (origin.lat + dest.lat) / 2
         mid_lng = (origin.lng + dest.lng) / 2
 
-        # --- Pass 1: sample checkpoints + ETAs for all 3 routes ---
+        t0 = time.perf_counter()
         prepared: list[dict[str, Any]] = []
-        all_points: list[tuple[float, float]] = []
+        checkpoint_points: list[tuple[float, float]] = []
         for idx, raw in enumerate(three):
             cps = sample_checkpoints(raw.geometry, interval_miles)
             etas = etas_along_route(
@@ -79,18 +155,30 @@ def analyze_routes(
                     "raw": raw,
                     "cps": cps,
                     "etas": etas,
-                    "point_offset": len(all_points),
+                    "point_offset": len(checkpoint_points),
                 }
             )
-            all_points.extend((cp.lat, cp.lng) for cp in cps)
+            checkpoint_points.extend((cp.lat, cp.lng) for cp in cps)
 
-        # --- ONE Open-Meteo multi-location request (48h) for every checkpoint ---
+        polylines = [list(r.geometry) for r in three]
+        grid_lnglat = corridor_grid_points(polylines)
+        grid_weather_pts = [(lat, lng) for lng, lat in grid_lnglat]
+        grid_offset = len(checkpoint_points)
+        all_points = checkpoint_points + grid_weather_pts
+        _timing(
+            f"checkpoints+corridor grid ({len(checkpoint_points)} cp, {len(grid_lnglat)} grid)",
+            t0,
+        )
+
+        t0 = time.perf_counter()
         series_all = weather.fetch_hourly_batch(all_points, client=client)
+        _timing(f"open-meteo batch ({len(all_points)} pts)", t0)
 
         storm_peak = 8
         if use_demo and series_all:
             storm_peak = weather.peak_hour_for_departure(series_all[0], departure)
 
+        t0 = time.perf_counter()
         route_payloads: list[dict[str, Any]] = []
         summaries: list[RouteRiskSummary] = []
 
@@ -116,7 +204,6 @@ def analyze_routes(
                         peak_hour=storm_peak,
                     )
                 eta = eta_by_idx[cp.index]
-                # Pick forecast hour by ETA; cached on rounded lat/lng + hour
                 sample = weather.sample_at_eta(series, eta.eta_utc)
                 level, risk_reason = classify_checkpoint_explained(sample, load_lb)
                 levels.append(level)
@@ -179,9 +266,29 @@ def analyze_routes(
         for rp in route_payloads:
             rp["recommended"] = rp["id"] == rec.route_id
             rp["rank"] = rec.ranked_ids.index(rp["id"]) + 1
+        _timing("risk + recommend", t0)
+
+        t0 = time.perf_counter()
+        grid_series = series_all[grid_offset : grid_offset + len(grid_lnglat)]
+        heatmap = _heatmap_payload(
+            grid_lnglat=grid_lnglat,
+            series_list=grid_series,
+            load_lb=load_lb,
+            use_demo=use_demo,
+            mid_lat=mid_lat,
+            mid_lng=mid_lng,
+            storm_peak=storm_peak,
+        )
+        _timing(f"heatmap assemble ({len(grid_lnglat)} pts × {HOURLY_HORIZON}h)", t0)
+        _timing("analyze_routes total", t_all)
 
         return {
-            "origin": {"query": origin_query, "lat": origin.lat, "lng": origin.lng, "label": origin.label},
+            "origin": {
+                "query": origin_query,
+                "lat": origin.lat,
+                "lng": origin.lng,
+                "label": origin.label,
+            },
             "destination": {
                 "query": destination_query,
                 "lat": dest.lat,
@@ -199,31 +306,8 @@ def analyze_routes(
                 "ranked_ids": rec.ranked_ids,
             },
             "routes": route_payloads,
+            "heatmap": heatmap,
         }
-
-
-def _normalize_polylines(
-    geometries: list[Any] | None,
-) -> list[list[tuple[float, float]]]:
-    """
-    Accept route geometries as [{lng, lat}, ...] or [[lng, lat], ...].
-    Always returns GeoJSON-ordered (lng, lat) tuples.
-    """
-    if not geometries:
-        return []
-    out: list[list[tuple[float, float]]] = []
-    for geom in geometries:
-        line: list[tuple[float, float]] = []
-        for pt in geom:
-            if isinstance(pt, dict):
-                lng = float(pt["lng"] if "lng" in pt else pt["lon"])
-                lat = float(pt["lat"])
-            else:
-                lng, lat = float(pt[0]), float(pt[1])
-            line.append((lng, lat))
-        if len(line) >= 2:
-            out.append(line)
-    return out
 
 
 def build_heatmap(
@@ -236,100 +320,64 @@ def build_heatmap(
     demo_storm: bool | None = None,
 ) -> dict[str, Any]:
     """
-    Corridor weather grid: points ONLY within ~30 km of the 3 route polylines.
+    Standalone heatmap (kept for the /weather/heatmap endpoint).
 
-    One Open-Meteo batch; each point carries 48 hourly risk scores (1–5).
-    Coordinates are GeoJSON [lng, lat]. Frontend picks weight for the selected hour.
+    Prefer the `heatmap` field on analyze_routes — one weather batch covers both.
     """
-    from core.corridor import corridor_grid_points
-    from core.open_meteo import HOURLY_HORIZON
-    from core.risk import WeatherSample, classify_checkpoint
-
     use_demo = settings.DEMO_STORM if demo_storm is None else demo_storm
     hours = max(1, min(HOURLY_HORIZON, int(hours)))
 
-    with httpx.Client(timeout=90.0) as client:
-        polylines = _normalize_polylines(geometries)
+    polylines: list[list[tuple[float, float]]] = []
+    if geometries:
+        for geom in geometries:
+            line: list[tuple[float, float]] = []
+            for pt in geom:
+                if isinstance(pt, dict):
+                    lng = float(pt["lng"] if "lng" in pt else pt["lon"])
+                    lat = float(pt["lat"])
+                else:
+                    lng, lat = float(pt[0]), float(pt[1])
+                line.append((lng, lat))
+            if len(line) >= 2:
+                polylines.append(line)
 
+    with httpx.Client(timeout=90.0) as client:
         if len(polylines) < 1:
             if not origin_query or not destination_query:
                 raise ValueError("provide geometries or origin+destination")
-            origin = geocoding.geocode(origin_query, client=client)
-            dest = geocoding.geocode(destination_query, client=client)
+            origin, dest = geocoding.geocode_pair(origin_query, destination_query)
             origin_ll = (origin.lng, origin.lat)
             dest_ll = (dest.lng, dest.lat)
             initial = routing.fetch_routes(
                 origin_ll, dest_ll, alternatives=True, client=client
             )
-            three = routing.ensure_three(
-                origin_ll, dest_ll, initial, client=client
-            )
-            polylines = [list(r.geometry) for r in three]  # already (lng, lat)
+            three = routing.ensure_three(origin_ll, dest_ll, initial, client=client)
+            polylines = [list(r.geometry) for r in three]
+            mid_lat = (origin.lat + dest.lat) / 2
+            mid_lng = (origin.lng + dest.lng) / 2
+        else:
+            all_lng = [lng for pl in polylines for lng, _ in pl]
+            all_lat = [lat for pl in polylines for _, lat in pl]
+            mid_lng = sum(all_lng) / len(all_lng)
+            mid_lat = sum(all_lat) / len(all_lat)
 
-        # Midpoint for demo storm (lng/lat careful)
-        all_lng = [lng for pl in polylines for lng, _ in pl]
-        all_lat = [lat for pl in polylines for _, lat in pl]
-        mid_lng = sum(all_lng) / len(all_lng)
-        mid_lat = sum(all_lat) / len(all_lat)
-
-        # Grid in GeoJSON (lng, lat), clipped to 30 km buffer
         grid_lnglat = corridor_grid_points(polylines)
-        # Weather batch expects (lat, lng) tuples
         weather_points = [(lat, lng) for lng, lat in grid_lnglat]
-
         series_list = weather.fetch_hourly_batch(weather_points, client=client)
 
         storm_peak = 8
         if use_demo and series_list:
             storm_peak = weather.peak_hour_for_departure(
-                series_list[0],
-                datetime.now(tz=timezone.utc),
+                series_list[0], datetime.now(tz=timezone.utc)
             )
 
-        time_axis: list[str] = []
-        if series_list and series_list[0].times:
-            time_axis = list(series_list[0].times[:hours])
-
-        points_out: list[dict[str, Any]] = []
-        for (lng, lat), series in zip(grid_lnglat, series_list):
-            wx = series
-            if use_demo:
-                wx = weather.apply_demo_storm(
-                    series,
-                    storm_lat=mid_lat + 0.35,
-                    storm_lng=mid_lng - 0.15,
-                    peak_hour=storm_peak,
-                )
-            risk_hours: list[int] = []
-            for h in range(hours):
-                if h >= len(wx.wind_mph):
-                    risk_hours.append(1)
-                    continue
-                sample = WeatherSample(
-                    wind_mph=wx.wind_mph[h],
-                    precip_in_hr=wx.precip_in[h],
-                    snow_in_hr=wx.snow_in[h],
-                )
-                level = classify_checkpoint(sample, load_lb)
-                risk_hours.append(int(level))
-            points_out.append(
-                {
-                    # GeoJSON position: [longitude, latitude]
-                    "coordinates": [lng, lat],
-                    "risk": risk_hours,
-                }
-            )
-
-        min_lng, min_lat = min(all_lng), min(all_lat)
-        max_lng, max_lat = max(all_lng), max(all_lat)
-        # Pad bbox ~30 km for the map
-        pad = 0.3
-        return {
-            "bbox": [min_lng - pad, min_lat - pad, max_lng + pad, max_lat + pad],
-            "hours": hours,
-            "times_utc": time_axis,
-            "coordinate_order": "lng,lat",
-            "buffer_km": 30,
-            "demo_storm": use_demo,
-            "points": points_out,
-        }
+        return _heatmap_payload(
+            grid_lnglat=grid_lnglat,
+            series_list=series_list,
+            load_lb=load_lb,
+            use_demo=use_demo,
+            mid_lat=mid_lat,
+            mid_lng=mid_lng,
+            storm_peak=storm_peak,
+            hours=hours,
+        )

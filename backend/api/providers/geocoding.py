@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import lru_cache
 
 import httpx
 from django.conf import settings
@@ -67,25 +69,40 @@ def _nominatim(query: str, client: httpx.Client) -> GeoResult | None:
     )
 
 
-def geocode(query: str, *, client: httpx.Client | None = None) -> GeoResult:
-    """
-    Resolve a free-text place name / address to lat/lng.
-
-    Tries Photon first; falls back to Nominatim (requires a User-Agent).
-    """
-    query = query.strip()
-    if not query:
-        raise GeocodingError("empty geocode query")
-
-    owns_client = client is None
-    client = client or httpx.Client(timeout=20.0)
-    try:
+def _geocode_uncached(query: str) -> GeoResult:
+    with httpx.Client(timeout=20.0) as client:
         result = _photon(query, client) or _nominatim(query, client)
         if result is None:
             raise GeocodingError(f"no results for '{query}'")
         return result
+
+
+@lru_cache(maxsize=256)
+def _geocode_cached(query: str) -> GeoResult:
+    """LRU-cached geocode by normalized query string."""
+    return _geocode_uncached(query)
+
+
+def geocode(query: str, *, client: httpx.Client | None = None) -> GeoResult:
+    """
+    Resolve a free-text place name / address to lat/lng.
+
+    Uses an LRU cache. `client` is accepted for API compatibility but ignored
+    when serving from cache / dedicated request clients.
+    """
+    del client  # each lookup uses its own short-lived client (thread-safe)
+    query = query.strip()
+    if not query:
+        raise GeocodingError("empty geocode query")
+    try:
+        return _geocode_cached(query)
     except httpx.HTTPError as exc:
         raise GeocodingError(f"geocoding failed: {exc}") from exc
-    finally:
-        if owns_client:
-            client.close()
+
+
+def geocode_pair(origin_query: str, destination_query: str) -> tuple[GeoResult, GeoResult]:
+    """Geocode origin and destination in parallel."""
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_origin = pool.submit(geocode, origin_query)
+        f_dest = pool.submit(geocode, destination_query)
+        return f_origin.result(), f_dest.result()

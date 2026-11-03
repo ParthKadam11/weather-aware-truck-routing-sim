@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
-import { analyzeRoutes, fetchHeatmap } from "./api/client";
+import { analyzeRoutes } from "./api/client";
 import { ForecastSlider } from "./components/ForecastSlider";
 import { MapView } from "./components/MapView";
 import { RiskLegend } from "./components/RiskLegend";
@@ -17,7 +17,6 @@ export default function App() {
   const [hour, setHour] = useState(0);
   const [showHeatmap, setShowHeatmap] = useState(true);
 
-  // All 48 frames held in memory; slider only picks an index
   const heatmapFrames = useMemo(() => memoizeHeatmapFrames(heatmap), [heatmap]);
 
   const onSubmit = useCallback(async (req: AnalyzeRequest) => {
@@ -29,14 +28,8 @@ export default function App() {
     setHour(0);
     try {
       const result = await analyzeRoutes(req);
-      const grid = await fetchHeatmap({
-        geometries: result.routes.map((r) => r.geometry),
-        hours: 48,
-        load_lb: req.load_lb,
-        demo_storm: req.demo_storm,
-      });
       setAnalysis(result);
-      setHeatmap(grid);
+      setHeatmap(result.heatmap ?? null);
       setSelectedId(result.recommendation.route_id);
       setHour(0);
     } catch (e) {

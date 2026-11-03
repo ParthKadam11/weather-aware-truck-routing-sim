@@ -1,4 +1,4 @@
-import type { AnalyzeRequest, AnalyzeResponse, HeatmapResponse } from "../types";
+import type { AnalyzeRequest, AnalyzeResponse } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") || "/api";
 
@@ -19,15 +19,4 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 
 export function analyzeRoutes(req: AnalyzeRequest): Promise<AnalyzeResponse> {
   return post<AnalyzeResponse>("/routes/analyze", req);
-}
-
-export function fetchHeatmap(body: {
-  geometries?: { lng: number; lat: number }[][];
-  origin?: string;
-  destination?: string;
-  hours?: number;
-  load_lb?: number;
-  demo_storm?: boolean | null;
-}): Promise<HeatmapResponse> {
-  return post<HeatmapResponse>("/weather/heatmap", body);
 }
