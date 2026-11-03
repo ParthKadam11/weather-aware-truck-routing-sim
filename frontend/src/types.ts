@@ -17,6 +17,7 @@ export interface Checkpoint {
   weather: WeatherAtPoint;
   risk: RiskLabel;
   risk_score: number;
+  risk_reason: string;
 }
 
 export interface RouteOption {
@@ -49,27 +50,24 @@ export interface AnalyzeResponse {
   routes: RouteOption[];
 }
 
-export interface HeatmapCell {
-  lat: number;
-  lng: number;
-  wind_mph: number;
-  precip_in: number;
-  snow_in: number;
-  intensity: number;
-}
-
-export interface HeatmapFrame {
-  hour: number;
-  time_utc: string | null;
-  cells: HeatmapCell[];
+/** Corridor grid point: GeoJSON [lng, lat] + 48 hourly risk scores (1–5). */
+export interface HeatmapPoint {
+  coordinates: [number, number]; // [lng, lat]
+  risk: number[];
 }
 
 export interface HeatmapResponse {
-  bbox: [number, number, number, number];
+  bbox: [number, number, number, number]; // [minLng, minLat, maxLng, maxLat]
   hours: number;
+  times_utc: string[];
+  coordinate_order: "lng,lat";
+  buffer_km: number;
   demo_storm: boolean;
-  frames: HeatmapFrame[];
+  points: HeatmapPoint[];
 }
+
+/** Precomputed heatmap weight per point for one forecast hour (held in memory). */
+export type HeatmapFrameWeights = number[];
 
 export interface AnalyzeRequest {
   origin: string;
@@ -81,13 +79,13 @@ export interface AnalyzeRequest {
   demo_storm?: boolean | null;
 }
 
-/** Risk palette — cool slate → amber → rose (no green). */
+/** Risk palette — Low green → Moderate yellow → High orange → Severe red → No Travel. */
 export const RISK_COLORS: Record<RiskLabel, string> = {
-  Low: "#6b8fad",
-  Moderate: "#c4a35a",
-  High: "#d17a45",
-  Severe: "#c44b4b",
-  "No Travel": "#5c3d6e",
+  Low: "#2f9e44",
+  Moderate: "#e6b800",
+  High: "#e8590c",
+  Severe: "#c92a2a",
+  "No Travel": "#1a1024",
 };
 
 export const ROUTE_COLORS = {

@@ -33,10 +33,7 @@ function RiskMiles({ route }: { route: RouteOption }) {
             color: "var(--muted)",
           }}
         >
-          <span
-            className="risk-dot"
-            style={{ background: RISK_COLORS[label] }}
-          />
+          <span className="risk-dot" style={{ background: RISK_COLORS[label] }} />
           {label} {(route.miles_by_risk[label] ?? 0).toFixed(0)} mi
         </span>
       ))}
@@ -45,7 +42,8 @@ function RiskMiles({ route }: { route: RouteOption }) {
 }
 
 export function RouteSummaryCards({ data, selectedId, onSelect }: Props) {
-  const sorted = [...data.routes].sort((a, b) => a.rank - b.rank);
+  // Stable A / B / C order (response order), not internal rank ids
+  const cards = [...data.routes].sort((a, b) => a.label.localeCompare(b.label));
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
@@ -54,7 +52,7 @@ export function RouteSummaryCards({ data, selectedId, onSelect }: Props) {
         {data.recommendation.reason}
       </div>
 
-      {sorted.map((route) => {
+      {cards.map((route) => {
         const selected = route.id === selectedId;
         const cls = [
           "route-option",
@@ -102,12 +100,6 @@ export function RouteSummaryCards({ data, selectedId, onSelect }: Props) {
                     Best
                   </span>
                 ) : null}
-              </span>
-              <span
-                className="tabular"
-                style={{ fontSize: "0.7rem", color: "var(--muted)" }}
-              >
-                #{route.rank}
               </span>
             </div>
             <div

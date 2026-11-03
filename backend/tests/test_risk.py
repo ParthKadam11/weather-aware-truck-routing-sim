@@ -88,3 +88,21 @@ def test_classify_checkpoint_uses_worst_condition():
     # High rain, low wind/snow → High (no load upgrade)
     weather = WeatherSample(wind_mph=10, precip_in_hr=0.3, snow_in_hr=0.0)
     assert classify_checkpoint(weather, load_lb=10_000) == RiskLevel.HIGH
+
+
+def test_classify_checkpoint_explained_names_driver():
+    from core.risk import classify_checkpoint_explained
+
+    weather = WeatherSample(wind_mph=10, precip_in_hr=0.3, snow_in_hr=0.0)
+    level, reason = classify_checkpoint_explained(weather, load_lb=10_000)
+    assert level == RiskLevel.HIGH
+    assert "rain" in reason.lower()
+
+
+def test_classify_checkpoint_explained_load_rule():
+    from core.risk import classify_checkpoint_explained
+
+    weather = WeatherSample(wind_mph=50, precip_in_hr=0.0, snow_in_hr=0.0)
+    level, reason = classify_checkpoint_explained(weather, load_lb=35_000)
+    assert level == RiskLevel.NO_TRAVEL
+    assert "load rule" in reason.lower()

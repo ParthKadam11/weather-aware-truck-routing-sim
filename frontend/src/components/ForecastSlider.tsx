@@ -1,7 +1,10 @@
+import { useEffect, useRef, useState } from "react";
+
 interface Props {
   hour: number;
   maxHour: number;
   timeLabel: string | null;
+  /** Called at most once per animation frame while dragging. */
   onChange: (hour: number) => void;
   disabled?: boolean;
   showHeatmap: boolean;
@@ -18,7 +21,33 @@ export function ForecastSlider({
   onToggleHeatmap,
 }: Props) {
   const safeMax = Math.max(0, maxHour);
+  // Local value for snappy thumb; parent notified via rAF
+  const [localHour, setLocalHour] = useState(hour);
+  const pendingRef = useRef<number | null>(null);
+  const latestRef = useRef(hour);
+
+  useEffect(() => {
+    setLocalHour(hour);
+    latestRef.current = hour;
+  }, [hour]);
+
+  useEffect(() => {
+    return () => {
+      if (pendingRef.current != null) cancelAnimationFrame(pendingRef.current);
+    };
+  }, []);
+
   const shortTime = timeLabel ? timeLabel.replace("T", " ").slice(0, 16) : null;
+
+  const onSlide = (next: number) => {
+    setLocalHour(next);
+    latestRef.current = next;
+    if (pendingRef.current != null) return;
+    pendingRef.current = requestAnimationFrame(() => {
+      pendingRef.current = null;
+      onChange(latestRef.current);
+    });
+  };
 
   return (
     <div
@@ -57,7 +86,7 @@ export function ForecastSlider({
               whiteSpace: "nowrap",
             }}
           >
-            {hour}h{shortTime ? ` · ${shortTime}` : ""}
+            {localHour}h{shortTime ? ` · ${shortTime}` : ""}
           </span>
         </div>
 
@@ -81,9 +110,9 @@ export function ForecastSlider({
         min={0}
         max={safeMax || 1}
         step={1}
-        value={Math.min(hour, safeMax)}
+        value={Math.min(localHour, safeMax)}
         disabled={disabled || safeMax <= 0}
-        onChange={(e) => onChange(Number(e.target.value))}
+        onChange={(e) => onSlide(Number(e.target.value))}
         aria-label="Forecast hour"
         style={{
           width: "100%",
@@ -102,7 +131,7 @@ export function ForecastSlider({
         }}
       >
         <span>0h</span>
-        <span>cached frames</span>
+        <span>48h in memory</span>
         <span>{safeMax}h</span>
       </div>
     </div>

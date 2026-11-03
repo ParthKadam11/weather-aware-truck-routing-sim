@@ -22,9 +22,11 @@ export function analyzeRoutes(req: AnalyzeRequest): Promise<AnalyzeResponse> {
 }
 
 export function fetchHeatmap(body: {
-  origin: string;
-  destination: string;
+  geometries?: { lng: number; lat: number }[][];
+  origin?: string;
+  destination?: string;
   hours?: number;
+  load_lb?: number;
   demo_storm?: boolean | null;
 }): Promise<HeatmapResponse> {
   return post<HeatmapResponse>("/weather/heatmap", body);

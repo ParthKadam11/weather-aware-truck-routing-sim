@@ -71,14 +71,16 @@ class HeatmapView(APIView):
         data = ser.validated_data
         try:
             result = build_heatmap(
-                origin_query=data["origin"],
-                destination_query=data["destination"],
+                origin_query=(data.get("origin") or None),
+                destination_query=(data.get("destination") or None),
+                geometries=data.get("geometries"),
                 hours=data.get("hours", 48),
+                load_lb=data.get("load_lb", 0),
                 demo_storm=data.get("demo_storm"),
             )
             return Response(result)
         except GeocodingError as exc:
             return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        except (WeatherError, ValueError) as exc:
+        except (RoutingError, WeatherError, ValueError) as exc:
             logger.exception("heatmap failed")
             return Response({"error": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)

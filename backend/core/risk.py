@@ -123,14 +123,51 @@ def apply_load_rules(wind_mph: float, load_lb: float, base: RiskLevel) -> RiskLe
 
 def classify_checkpoint(weather: WeatherSample, load_lb: float) -> RiskLevel:
     """Worst of wind/rain/snow, then apply load rules based on wind + weight."""
-    base = worst_of(
-        [
-            classify_wind(weather.wind_mph),
-            classify_rain(weather.precip_in_hr),
-            classify_snow(weather.snow_in_hr),
-        ]
-    )
-    return apply_load_rules(weather.wind_mph, load_lb, base)
+    return classify_checkpoint_explained(weather, load_lb)[0]
+
+
+def classify_checkpoint_explained(
+    weather: WeatherSample, load_lb: float
+) -> tuple[RiskLevel, str]:
+    """
+    Same classification as classify_checkpoint, plus a short human reason.
+
+    Reason names the driving hazard (and load upgrade when it raises severity).
+    """
+    wind_l = classify_wind(weather.wind_mph)
+    rain_l = classify_rain(weather.precip_in_hr)
+    snow_l = classify_snow(weather.snow_in_hr)
+    base = worst_of([wind_l, rain_l, snow_l])
+
+    drivers: list[str] = []
+    if wind_l == base:
+        drivers.append(f"wind {weather.wind_mph:.0f} mph")
+    if rain_l == base:
+        drivers.append(f"rain {weather.precip_in_hr:.2f} in/h")
+    if snow_l == base:
+        drivers.append(f"snow {weather.snow_in_hr:.2f} in/h")
+    if not drivers:
+        drivers.append("conditions within Low thresholds")
+
+    final = apply_load_rules(weather.wind_mph, load_lb, base)
+    reason = " · ".join(drivers)
+
+    if final > base:
+        if weather.wind_mph >= 55:
+            reason = f"load rule: wind ≥55 mph → No Travel ({reason})"
+        elif 45 <= weather.wind_mph < 55 and load_lb > 30_000:
+            reason = (
+                f"load rule: 45–54 mph wind + load >30,000 lb → No Travel ({reason})"
+            )
+        elif 35 <= weather.wind_mph < 45 and load_lb > 40_000:
+            reason = (
+                f"load rule: 35–44 mph wind + load >40,000 lb → Severe ({reason})"
+            )
+
+    if final == RiskLevel.LOW and base == RiskLevel.LOW:
+        reason = "within Low thresholds for wind, rain, and snow"
+
+    return final, reason
 
 
 def label(level: RiskLevel) -> str:
