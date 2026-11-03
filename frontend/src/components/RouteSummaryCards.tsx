@@ -52,6 +52,19 @@ export function RouteSummaryCards({ data, selectedId, onSelect }: Props) {
         {data.recommendation.reason}
       </div>
 
+      {data.routing_note ? (
+        <p
+          style={{
+            margin: 0,
+            fontSize: "0.72rem",
+            color: "var(--muted)",
+            textWrap: "pretty",
+          }}
+        >
+          {data.routing_note}
+        </p>
+      ) : null}
+
       {cards.map((route) => {
         const selected = route.id === selectedId;
         const cls = [

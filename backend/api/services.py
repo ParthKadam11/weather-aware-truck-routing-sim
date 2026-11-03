@@ -125,9 +125,11 @@ def analyze_routes(
         dest_ll = (dest.lng, dest.lat)
 
         t0 = time.perf_counter()
-        initial = routing.fetch_routes(origin_ll, dest_ll, alternatives=True, client=client)
-        three = routing.ensure_three(origin_ll, dest_ll, initial, client=client)
-        _timing("routing (3 routes)", t0)
+        initial = routing.fetch_routes(origin_ll, dest_ll, alternatives=3, client=client)
+        route_set = routing.ensure_three(origin_ll, dest_ll, initial, client=client)
+        three = route_set.routes
+        routing_note = route_set.note
+        _timing(f"routing ({len(three)} routes)", t0)
 
         mid_lat = (origin.lat + dest.lat) / 2
         mid_lng = (origin.lng + dest.lng) / 2
@@ -294,9 +296,13 @@ def analyze_routes(
             "interval_miles": interval_miles,
             "display_tz": display_tz,
             "demo_storm": use_demo,
+            "routing_note": routing_note or None,
             "recommendation": {
                 "route_id": rec.route_id,
-                "reason": rec.reason,
+                "reason": (
+                    f"{rec.reason}"
+                    + (f" {routing_note}" if routing_note else "")
+                ).strip(),
                 "ranked_ids": rec.ranked_ids,
             },
             "routes": route_payloads,
@@ -343,9 +349,11 @@ def build_heatmap(
             origin_ll = (origin.lng, origin.lat)
             dest_ll = (dest.lng, dest.lat)
             initial = routing.fetch_routes(
-                origin_ll, dest_ll, alternatives=True, client=client
+                origin_ll, dest_ll, alternatives=3, client=client
             )
-            three = routing.ensure_three(origin_ll, dest_ll, initial, client=client)
+            three = routing.ensure_three(
+                origin_ll, dest_ll, initial, client=client
+            ).routes
             polylines = [list(r.geometry) for r in three]
             mid_lat = (origin.lat + dest.lat) / 2
             mid_lng = (origin.lng + dest.lng) / 2

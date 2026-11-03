@@ -58,6 +58,8 @@ export interface AnalyzeResponse {
   interval_miles: number;
   display_tz: string;
   demo_storm: boolean;
+  /** Present when fewer than 3 distinct routes could be found (no clones). */
+  routing_note?: string | null;
   recommendation: {
     route_id: string;
     reason: string;
