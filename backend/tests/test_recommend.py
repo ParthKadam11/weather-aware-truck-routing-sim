@@ -79,13 +79,15 @@ def test_tiebreak_shortest_time():
 
 
 def test_build_miles_by_level():
+    # Forward segments: last checkpoint may own 0
     levels = [RiskLevel.LOW, RiskLevel.HIGH, RiskLevel.SEVERE]
-    miles = [10.0, 20.0, 5.0]
+    miles = [10.0, 20.0, 0.0]
     result = build_miles_by_level(levels, miles)
     assert result[RiskLevel.LOW] == 10.0
     assert result[RiskLevel.HIGH] == 20.0
-    assert result[RiskLevel.SEVERE] == 5.0
+    assert result[RiskLevel.SEVERE] == 0.0
     assert result[RiskLevel.MODERATE] == 0.0
+    assert sum(result.values()) == 30.0
 
 
 def test_average_risk():

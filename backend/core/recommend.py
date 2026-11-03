@@ -98,21 +98,45 @@ def _reason(best: RouteRiskSummary, ranked: Sequence[RouteRiskSummary]) -> str:
     )
 
 
+def forward_segment_miles(cumulative_miles: Sequence[float]) -> list[float]:
+    """
+    Each checkpoint owns the distance up to the *next* checkpoint.
+
+    For distances [0, 25, 50, 80] → [25, 25, 30, 0].
+    Sum equals the final cumulative distance (route length along samples).
+    """
+    if not cumulative_miles:
+        return []
+    out: list[float] = []
+    for i, dist in enumerate(cumulative_miles):
+        if i + 1 < len(cumulative_miles):
+            out.append(float(cumulative_miles[i + 1]) - float(dist))
+        else:
+            out.append(0.0)
+    return out
+
+
 def build_miles_by_level(
     checkpoint_levels: Sequence[RiskLevel],
     segment_miles: Sequence[float],
 ) -> dict[RiskLevel, float]:
     """
-    Attribute each segment's miles to the risk of the checkpoint at its end
-    (weather encountered when arriving at that point).
+    Attribute each forward segment's miles to that checkpoint's risk level.
+
+    `segment_miles[i]` is the distance from checkpoint i to i+1 (0 for the last).
+    Bucket totals must sum to the route length (sum of segment_miles).
     """
     if len(checkpoint_levels) != len(segment_miles):
         raise ValueError("levels and segment_miles length mismatch")
 
     miles: dict[RiskLevel, float] = {level: 0.0 for level in RiskLevel}
     for level, mi in zip(checkpoint_levels, segment_miles):
-        miles[level] = miles.get(level, 0.0) + mi
+        miles[level] = miles.get(level, 0.0) + float(mi)
     return miles
+
+
+def total_miles(miles_by_level: dict[RiskLevel, float]) -> float:
+    return sum(miles_by_level.values())
 
 
 def average_risk(checkpoint_levels: Sequence[RiskLevel]) -> float:

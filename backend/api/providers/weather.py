@@ -1,10 +1,9 @@
 """
 Open-Meteo hourly weather + optional demo-storm overlay.
 
-Open-Meteo is free / no key. We request:
-  - wind_speed_10m in mph
-  - precipitation in inch
-  - snowfall in cm (converted to inches via core.units)
+Fetches ALL checkpoint coordinates in ONE multi-location request
+(comma-separated lat/lng lists, 48 hourly values). Samples are cached per
+rounded lat/lng + forecast hour.
 """
 
 from __future__ import annotations
@@ -19,8 +18,13 @@ import httpx
 from django.conf import settings
 
 from core.cache import weather_cache
+from core.open_meteo import (
+    HOURLY_HORIZON,
+    forecast_query_params,
+    forecast_query_params_multi,
+    parse_hourly_payload,
+)
 from core.risk import WeatherSample
-from core.units import cm_to_inches
 
 
 @dataclass(frozen=True)
@@ -39,37 +43,61 @@ class WeatherError(Exception):
     pass
 
 
-def _cache_key(lat: float, lng: float, start: str, end: str) -> str:
-    raw = f"{lat:.3f},{lng:.3f},{start},{end}"
+def _round_ll(lat: float, lng: float) -> tuple[float, float]:
+    return (round(lat, 3), round(lng, 3))
+
+
+def _series_cache_key(lat: float, lng: float) -> str:
+    rlat, rlng = _round_ll(lat, lng)
+    raw = f"series:{rlat},{rlng}:h{HOURLY_HORIZON}"
     return "wx:" + hashlib.sha1(raw.encode()).hexdigest()
 
 
+def _hour_cache_key(lat: float, lng: float, hour_key: str) -> str:
+    """Cache key for a single ETA hour sample: rounded lat/lng + hour."""
+    rlat, rlng = _round_ll(lat, lng)
+    raw = f"hour:{rlat},{rlng}:{hour_key}"
+    return "wxh:" + hashlib.sha1(raw.encode()).hexdigest()
+
+
+def _eta_hour_key(eta_utc: datetime) -> str:
+    if eta_utc.tzinfo is None:
+        eta_utc = eta_utc.replace(tzinfo=timezone.utc)
+    else:
+        eta_utc = eta_utc.astimezone(timezone.utc)
+    return eta_utc.replace(minute=0, second=0, microsecond=0).strftime("%Y-%m-%dT%H:%M")
+
+
 def _parse_series(lat: float, lng: float, hourly: dict) -> HourlySeries:
-    times = hourly.get("time") or []
-    wind = [float(v or 0) for v in (hourly.get("wind_speed_10m") or [])]
-    precip = [float(v or 0) for v in (hourly.get("precipitation") or [])]
-    snow_cm = [float(v or 0) for v in (hourly.get("snowfall") or [])]
-    snow_in = [cm_to_inches(v) for v in snow_cm]
-    n = len(times)
+    parsed = parse_hourly_payload(hourly, max_hours=HOURLY_HORIZON)
     return HourlySeries(
-        times=times,
-        wind_mph=wind[:n],
-        precip_in=precip[:n],
-        snow_in=snow_in[:n],
+        times=parsed.times,
+        wind_mph=parsed.wind_mph,
+        precip_in=parsed.precip_in,
+        snow_in=parsed.snow_in,
         lat=lat,
         lng=lng,
     )
+
+
+def _normalize_multi_response(data: object) -> list[dict]:
+    """Open-Meteo returns a list for multi-location, object for single."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        return [data]
+    raise WeatherError(f"unexpected Open-Meteo payload type: {type(data)}")
 
 
 def fetch_hourly(
     lat: float,
     lng: float,
     *,
-    forecast_days: int = 3,
+    forecast_days: int | None = None,
     client: httpx.Client | None = None,
 ) -> HourlySeries:
-    """Fetch (or cache) hourly forecast for one coordinate."""
-    key = _cache_key(lat, lng, "now", str(forecast_days))
+    """Fetch (or cache) 48h hourly forecast for one coordinate."""
+    key = _series_cache_key(lat, lng)
     cached = weather_cache.get(key)
     if cached is not None:
         return cached
@@ -78,19 +106,15 @@ def fetch_hourly(
     client = client or httpx.Client(timeout=30.0)
     try:
         url = f"{settings.OPEN_METEO_BASE_URL.rstrip('/')}/v1/forecast"
-        params = {
-            "latitude": lat,
-            "longitude": lng,
-            "hourly": "wind_speed_10m,precipitation,snowfall",
-            "wind_speed_unit": "mph",
-            "precipitation_unit": "inch",
-            "forecast_days": forecast_days,
-            "timezone": "UTC",
-        }
+        params = forecast_query_params(
+            lat, lng, forecast_days=forecast_days, forecast_hours=HOURLY_HORIZON
+        )
         resp = client.get(url, params=params)
         resp.raise_for_status()
         data = resp.json()
-        series = _parse_series(lat, lng, data.get("hourly") or {})
+        # multi-endpoint may wrap even one point as a list
+        loc = _normalize_multi_response(data)[0]
+        series = _parse_series(lat, lng, loc.get("hourly") or {})
         weather_cache.set(key, series, ttl_s=settings.WEATHER_CACHE_TTL_S)
         return series
     except httpx.HTTPError as exc:
@@ -103,53 +127,99 @@ def fetch_hourly(
 def fetch_hourly_batch(
     points: Sequence[tuple[float, float]],
     *,
-    forecast_days: int = 3,
+    forecast_days: int | None = None,
+    forecast_hours: int = HOURLY_HORIZON,
     client: httpx.Client | None = None,
 ) -> list[HourlySeries]:
     """
-    Batch by unique rounded coordinates to cut API calls.
-    Open-Meteo also supports multi-lat/lng in one request; we group uniques.
+    ONE Open-Meteo request for all coordinates (comma-separated lat/lng lists).
+
+    Dedupes by rounded lat/lng, requests 48 hourly values, maps results back
+    to the original point order.
     """
+    if not points:
+        return []
+
     owns = client is None
-    client = client or httpx.Client(timeout=45.0)
+    client = client or httpx.Client(timeout=60.0)
     try:
-        # Deduplicate at ~100m precision
-        unique: dict[tuple[float, float], list[int]] = {}
+        # Preserve order of first occurrence for the HTTP request
+        unique_order: list[tuple[float, float]] = []
+        index_map: dict[tuple[float, float], list[int]] = {}
         for i, (lat, lng) in enumerate(points):
-            key = (round(lat, 3), round(lng, 3))
-            unique.setdefault(key, []).append(i)
+            key = _round_ll(lat, lng)
+            if key not in index_map:
+                index_map[key] = []
+                unique_order.append(key)
+            index_map[key].append(i)
 
         results: list[HourlySeries | None] = [None] * len(points)
-        for (lat, lng), indices in unique.items():
-            series = fetch_hourly(lat, lng, forecast_days=forecast_days, client=client)
-            for i in indices:
-                results[i] = series
+        missing: list[tuple[float, float]] = []
+        for key in unique_order:
+            cached = weather_cache.get(_series_cache_key(key[0], key[1]))
+            if cached is not None:
+                for i in index_map[key]:
+                    results[i] = cached
+            else:
+                missing.append(key)
+
+        if missing:
+            url = f"{settings.OPEN_METEO_BASE_URL.rstrip('/')}/v1/forecast"
+            lats = [m[0] for m in missing]
+            lngs = [m[1] for m in missing]
+            params = forecast_query_params_multi(
+                lats, lngs, forecast_hours=forecast_hours
+            )
+            # forecast_days override if caller insists (kept for heatmap compat)
+            if forecast_days is not None:
+                params["forecast_days"] = max(
+                    int(params["forecast_days"]), int(forecast_days)
+                )
+            resp = client.get(url, params=params)
+            resp.raise_for_status()
+            locations = _normalize_multi_response(resp.json())
+            if len(locations) != len(missing):
+                raise WeatherError(
+                    f"Open-Meteo returned {len(locations)} locations, expected {len(missing)}"
+                )
+            for (lat, lng), loc in zip(missing, locations):
+                series = _parse_series(lat, lng, loc.get("hourly") or {})
+                weather_cache.set(
+                    _series_cache_key(lat, lng), series, ttl_s=settings.WEATHER_CACHE_TTL_S
+                )
+                for i in index_map[(lat, lng)]:
+                    results[i] = series
 
         assert all(r is not None for r in results)
         return results  # type: ignore[return-value]
+    except httpx.HTTPError as exc:
+        raise WeatherError(f"weather batch fetch failed: {exc}") from exc
     finally:
         if owns:
             client.close()
 
 
 def sample_at_eta(series: HourlySeries, eta_utc: datetime) -> WeatherSample:
-    """Pick the hourly slot closest to (floor of) the ETA hour."""
-    if eta_utc.tzinfo is None:
-        eta_utc = eta_utc.replace(tzinfo=timezone.utc)
-    else:
-        eta_utc = eta_utc.astimezone(timezone.utc)
+    """
+    Pick the hourly slot for this ETA.
+
+    Caches the sample under rounded lat/lng + hour so repeat lookups are free.
+    """
+    hour_key = _eta_hour_key(eta_utc)
+    cache_key = _hour_cache_key(series.lat, series.lng, hour_key)
+    cached = weather_cache.get(cache_key)
+    if cached is not None:
+        return cached
 
     if not series.times:
-        return WeatherSample(0.0, 0.0, 0.0)
+        sample = WeatherSample(0.0, 0.0, 0.0)
+        weather_cache.set(cache_key, sample, ttl_s=settings.WEATHER_CACHE_TTL_S)
+        return sample
 
-    # Times look like "2026-06-01T14:00"
-    target = eta_utc.replace(minute=0, second=0, microsecond=0)
-    target_str = target.strftime("%Y-%m-%dT%H:%M")
-
-    if target_str in series.times:
-        idx = series.times.index(target_str)
+    if hour_key in series.times:
+        idx = series.times.index(hour_key)
     else:
-        # Fall back to nearest index by parsing
+        target = datetime.fromisoformat(hour_key).replace(tzinfo=timezone.utc)
         idx = 0
         best = abs(
             (
@@ -164,11 +234,13 @@ def sample_at_eta(series: HourlySeries, eta_utc: datetime) -> WeatherSample:
                 idx = i
 
     idx = min(idx, len(series.wind_mph) - 1)
-    return WeatherSample(
+    sample = WeatherSample(
         wind_mph=series.wind_mph[idx],
         precip_in_hr=series.precip_in[idx],
         snow_in_hr=series.snow_in[idx],
     )
+    weather_cache.set(cache_key, sample, ttl_s=settings.WEATHER_CACHE_TTL_S)
+    return sample
 
 
 def apply_demo_storm(
@@ -180,25 +252,18 @@ def apply_demo_storm(
 ) -> HourlySeries:
     """
     Overlay a fake intense storm near (storm_lat, storm_lng) peaking at hour index.
-
-    Used when DEMO_STORM=1 so reviewers see recommendation changes without
-    waiting for real severe weather. Keeps a baseline boost near the center
-    even off-peak so trips that don't hit `peak_hour` still show elevated risk.
     """
     wind = list(series.wind_mph)
     precip = list(series.precip_in)
     snow = list(series.snow_in)
 
-    # Distance from storm center (degrees ≈ rough)
     dist = math.hypot(series.lat - storm_lat, series.lng - storm_lng)
-    # Influence radius ~2.0 degrees — wide enough to clip some but not all alts
     influence = max(0.0, 1.0 - dist / 2.0)
 
     for i in range(len(wind)):
-        # Gaussian peak + 0.35 floor so off-peak hours still look stormy nearby
         hour_w = 0.35 + 0.65 * math.exp(-0.5 * ((i - peak_hour) / 6.0) ** 2)
         factor = influence * hour_w
-        wind[i] = max(wind[i], 18.0 + 50.0 * factor)  # up to ~68 mph at center
+        wind[i] = max(wind[i], 18.0 + 50.0 * factor)
         precip[i] = max(precip[i], 0.05 + 1.2 * factor)
         snow[i] = max(snow[i], 0.2 + 3.5 * factor)
 
@@ -224,7 +289,6 @@ def peak_hour_for_departure(series: HourlySeries, departure_utc: datetime) -> in
     target_str = target.strftime("%Y-%m-%dT%H:%M")
     if target_str in series.times:
         return series.times.index(target_str)
-    # Nearest
     best_i, best_d = 0, float("inf")
     for i, t in enumerate(series.times):
         dt = datetime.fromisoformat(t).replace(tzinfo=timezone.utc)
@@ -237,6 +301,5 @@ def peak_hour_for_departure(series: HourlySeries, departure_utc: datetime) -> in
 def maybe_demo(series: HourlySeries, corridor_mid: tuple[float, float]) -> HourlySeries:
     if not settings.DEMO_STORM:
         return series
-    # Place storm slightly offset from corridor midpoint so some routes miss it
     lat, lng = corridor_mid
     return apply_demo_storm(series, storm_lat=lat + 0.4, storm_lng=lng - 0.3, peak_hour=8)

@@ -19,6 +19,7 @@ from core.recommend import (
     RouteRiskSummary,
     average_risk,
     build_miles_by_level,
+    forward_segment_miles,
     recommend,
 )
 from core.risk import RISK_LABELS, classify_checkpoint
@@ -61,11 +62,10 @@ def analyze_routes(
         mid_lat = (origin.lat + dest.lat) / 2
         mid_lng = (origin.lng + dest.lng) / 2
 
-        route_payloads: list[dict[str, Any]] = []
-        summaries: list[RouteRiskSummary] = []
-
+        # --- Pass 1: sample checkpoints + ETAs for all 3 routes ---
+        prepared: list[dict[str, Any]] = []
+        all_points: list[tuple[float, float]] = []
         for idx, raw in enumerate(three):
-            route_id = f"route-{idx}"
             cps = sample_checkpoints(raw.geometry, interval_miles)
             etas = etas_along_route(
                 cps,
@@ -73,22 +73,42 @@ def analyze_routes(
                 total_duration_s=raw.duration_s,
                 total_distance_m=raw.distance_m or 1.0,
             )
-            eta_by_idx = {e.checkpoint_index: e for e in etas}
+            prepared.append(
+                {
+                    "idx": idx,
+                    "raw": raw,
+                    "cps": cps,
+                    "etas": etas,
+                    "point_offset": len(all_points),
+                }
+            )
+            all_points.extend((cp.lat, cp.lng) for cp in cps)
 
-            points = [(cp.lat, cp.lng) for cp in cps]
-            series_list = weather.fetch_hourly_batch(points, forecast_days=3, client=client)
+        # --- ONE Open-Meteo multi-location request (48h) for every checkpoint ---
+        series_all = weather.fetch_hourly_batch(all_points, client=client)
+
+        storm_peak = 8
+        if use_demo and series_all:
+            storm_peak = weather.peak_hour_for_departure(series_all[0], departure)
+
+        route_payloads: list[dict[str, Any]] = []
+        summaries: list[RouteRiskSummary] = []
+
+        for item in prepared:
+            idx = item["idx"]
+            raw = item["raw"]
+            cps = item["cps"]
+            etas = item["etas"]
+            offset = item["point_offset"]
+            series_list = series_all[offset : offset + len(cps)]
+            eta_by_idx = {e.checkpoint_index: e for e in etas}
+            route_id = f"route-{idx}"
 
             checkpoint_rows = []
             levels = []
-            segment_miles = []
-
-            storm_peak = 8
-            if use_demo and series_list:
-                storm_peak = weather.peak_hour_for_departure(series_list[0], departure)
 
             for cp, series in zip(cps, series_list):
                 if use_demo:
-                    # Offset north of the corridor so northern alts catch more storm
                     series = weather.apply_demo_storm(
                         series,
                         storm_lat=mid_lat + 0.55,
@@ -96,10 +116,10 @@ def analyze_routes(
                         peak_hour=storm_peak,
                     )
                 eta = eta_by_idx[cp.index]
+                # Pick forecast hour by ETA; cached on rounded lat/lng + hour
                 sample = weather.sample_at_eta(series, eta.eta_utc)
                 level = classify_checkpoint(sample, load_lb)
                 levels.append(level)
-                segment_miles.append(meters_to_miles(cp.segment_m))
 
                 checkpoint_rows.append(
                     {
@@ -107,7 +127,6 @@ def analyze_routes(
                         "lat": cp.lat,
                         "lng": cp.lng,
                         "distance_miles": round(meters_to_miles(cp.distance_m), 2),
-                        "segment_miles": round(meters_to_miles(cp.segment_m), 2),
                         "eta_utc": eta.eta_utc.isoformat(),
                         "eta_local": to_local(eta.eta_utc, display_tz).isoformat(),
                         "weather": {
@@ -119,6 +138,11 @@ def analyze_routes(
                         "risk_score": int(level),
                     }
                 )
+
+            cumulative_mi = [meters_to_miles(cp.distance_m) for cp in cps]
+            segment_miles = forward_segment_miles(cumulative_mi)
+            for row, owned_mi in zip(checkpoint_rows, segment_miles):
+                row["segment_miles"] = round(owned_mi, 2)
 
             miles_by = build_miles_by_level(levels, segment_miles)
             avg = average_risk(levels)
